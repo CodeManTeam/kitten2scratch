@@ -100,7 +100,7 @@ const BLOCK_MAP = {
   wait_until: { opcode: "control_wait_until", map: { CONDITION: E("condition") } },
   repeat_forever_until: { opcode: "control_repeat_until", map: { CONDITION: E("condition") }, branch: "child_block" },
   break: { opcode: "control_stop", map: { STOP_OPTION: null, HAS_NEXT: null }, special: "break" },
-  warp: { opcode: "control_start_as_clone", map: {}, special: "warp" },
+  warp: { opcode: "motion_align_scene", map: {}, special: "warp" },
 
   // ===== Motion =====
   self_go_forward: { opcode: "motion_movesteps", special: "move_forward" },
@@ -119,7 +119,7 @@ const BLOCK_MAP = {
   self_change_scale_2: { opcode: "looks_setsizeto", map: { SIZE: E("scale") } },
   self_text_effect_text: { opcode: "looks_say", map: { MESSAGE: E("text") } },
   self_text_effect_color: { opcode: "looks_seteffectto", map: { EFFECT: "color", VALUE: E("color") } },
-  set_theatre_layer: { opcode: "motion_gotofrontback", special: "layer" },
+  set_theatre_layer: { opcode: "looks_gotofrontback", special: "layer" },
   set_scale: { opcode: "looks_setsizeto", map: { SIZE: E("scale") } },
 
   // ===== Sound =====
@@ -206,7 +206,7 @@ const BLOCK_MAP = {
   procedures_2_stable_parameter: { opcode: "argument_reporter_string_number", special: "procedure_param" },
 
   // ===== Clones =====
-  start_as_a_mirror: { opcode: "control_start_as_clone", map: {} },
+  start_as_a_mirror: { opcode: "control_start_as_clone", map: {}, hat: true },
   dispose_clone: { opcode: "control_stop", map: { STOP_OPTION: "this clone", HAS_NEXT: null } },
   get_current_clone_index: { opcode: "sensing_of", special: "clone_index" },
   get_clone_num: { opcode: "sensing_of", special: "clone_count" },

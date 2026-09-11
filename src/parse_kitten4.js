@@ -248,12 +248,14 @@ function applySpecial(type, irBlock, kittenBlock, context) {
     case "change_variable":
     case "change_cloud_variable":
     case "change_variables": {
+      delete irBlock.inputs.VALNAME;
+      delete irBlock.inputs.METHOD;
       irBlock.fields.VARIABLE = params.VAR || params.valname || params.variable || "<unknown>";
-      if (params.value !== undefined && !irBlock.inputs.VALUE) {
-        irBlock.inputs.VALUE = isBlockRef(params.value) ? makeExpr(convertBlock(params.value, context)) : makeValue(String(params.value), "string");
-      }
       if (params.n !== undefined && !irBlock.inputs.VALUE) {
         irBlock.inputs.VALUE = isBlockRef(params.n) ? makeExpr(convertBlock(params.n, context)) : makeValue(String(params.n), "string");
+      }
+      if (params.value !== undefined && !irBlock.inputs.VALUE) {
+        irBlock.inputs.VALUE = isBlockRef(params.value) ? makeExpr(convertBlock(params.value, context)) : makeValue(String(params.value), "string");
       }
       break;
     }
@@ -278,10 +280,11 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       const procTable = context.procedures || (context.project && context.project.procedures);
       const procDef = procTable && procTable.get(procName);
       const paramNames = procDef ? procDef.paramNames : Object.keys(params);
+      const callProccode = procName + paramNames.map(() => " %s").join("");
       irBlock.mutation = {
         tagName: "mutation",
         children: [],
-        proccode: procName,
+        proccode: callProccode,
         argumentids: JSON.stringify(paramNames.map((_, i) => `arg${i}`)),
         warp: "false",
       };
@@ -297,6 +300,14 @@ function applySpecial(type, irBlock, kittenBlock, context) {
     case "procedures_2_actor_param":
     case "procedures_2_stable_parameter": {
       irBlock.fields.VALUE = kittenBlock.params.param_name || kittenBlock.params.name || "";
+      break;
+    }
+    case "show_hide_variable": {
+      // Kitten show/hide variable -> Scratch data_showvariable/data_hidevariable
+      irBlock.opcode = params.FUNC === "hide" ? "data_hidevariable" : "data_showvariable";
+      delete irBlock.inputs.FUNC;
+      delete irBlock.inputs.VAR;
+      irBlock.fields.VARIABLE = params.VAR || "<unknown>";
       break;
     }
     case "switch_screen": {
@@ -320,6 +331,22 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       }
       break;
     }
+    case "set_theatre_layer": {
+      // Kitten layer values: "peak" (front-most) and "base"/"bottom" (back-most)
+      irBlock.fields.LAYER = params.layer === "peak" ? "front" : "back";
+      delete irBlock.inputs.LAYER;
+      break;
+    }
+    case "warp": {
+      // Kitten "warp" is a scratch-2 style no-op wrapper; keep the children
+      // running after it via the next chain.
+      const warpChild = (kittenBlock.child_block || [])[0];
+      irBlock.branches = [];
+      if (warpChild && typeof warpChild === "object") {
+        irBlock.__nextChain = convertChain(warpChild, context);
+      }
+      break;
+    }
     case "move_forward": {
       if (params.steps !== undefined && !irBlock.inputs.STEPS) {
         irBlock.inputs.STEPS = isBlockRef(params.steps) ? makeExpr(convertBlock(params.steps, context)) : makeValue(Number(params.steps) || 0, "number");
@@ -333,11 +360,15 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       }
       break;
       }
-    case "stage_dialog": {
+    case "create_stage_dialog": {
       irBlock.opcode = "looks_say";
-      if (params.message !== undefined && !irBlock.inputs.MESSAGE) {
-        irBlock.inputs.MESSAGE = isBlockRef(params.message) ? makeExpr(convertBlock(params.message, context)) : makeValue(String(params.message), "string");
-      }
+      delete irBlock.inputs.TEXT;
+      delete irBlock.inputs.ACTOR;
+      delete irBlock.inputs.MESSAGE;
+      const textParam = params.message !== undefined ? params.message : params.text;
+      irBlock.inputs.MESSAGE = isBlockRef(textParam)
+        ? makeExpr(convertBlock(textParam, context))
+        : makeValue(String(textParam ?? ""), "string");
       break;
     }
     case "arithmetic": {
@@ -477,7 +508,7 @@ function parseKitten4(projectJson) {
         mutation: {
           tagName: "mutation",
           children: [],
-          proccode: rootBlock.procedure_name || "function",
+        proccode: (rootBlock.procedure_name || "function") + paramNames.map(() => " %s").join(""),
           argumentids: JSON.stringify(paramNames.map((_, i) => `arg${i}`)),
           argumentnames: JSON.stringify(paramNames),
           argumentdefaults: JSON.stringify(paramNames.map(() => "")),
@@ -506,7 +537,7 @@ function parseKitten4(projectJson) {
         mutation: {
           tagName: "mutation",
           children: [],
-          proccode: rootBlock.procedure_name || "function",
+          proccode: (rootBlock.procedure_name || "function") + paramNames.map(() => " %s").join(""),
           argumentids: JSON.stringify(paramNames.map((_, i) => `arg${i}`)),
           argumentnames: JSON.stringify(paramNames),
           argumentdefaults: JSON.stringify(paramNames.map(() => "")),

@@ -16,6 +16,25 @@ function resetIds() { blockIdCounter = 0; }
 const BLANK_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1' viewBox='0 0 1 1'/>";
 const BLANK_MD5EXT = crypto.createHash("md5").update(BLANK_SVG).digest("hex") + ".svg";
 
+const XML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };
+function xmlEscape(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => XML_ESCAPES[ch]);
+}
+function serializeMutation(mutation) {
+  if (!mutation) return null;
+  const out = {};
+  for (const [key, value] of Object.entries(mutation)) {
+    if (key === "tagName") continue;
+    if (typeof value === "boolean") {
+      out[key] = value ? "true" : "false";
+    } else {
+      out[key] = value;
+    }
+  }
+  if (!Array.isArray(out.children)) out.children = [];
+  return out;
+}
+
 function emitChain(chain, container, parentKey = null, context = null) {
   const ids = [];
   let prevId = parentKey;
@@ -64,7 +83,8 @@ function emitBlock(block, container, blockId, context) {
     attachChain(sb3Block, block.__nextChain, container, context);
   }
   if (block.mutation) {
-    sb3Block.mutation = { tagName: "mutation", children: [], ...block.mutation };
+    const serialized = serializeMutation(block.mutation);
+    if (serialized) sb3Block.mutation = serialized;
   }
 
   for (const [inputName, input] of Object.entries(block.inputs)) {
@@ -116,12 +136,35 @@ function emitBlock(block, container, blockId, context) {
 
 function emitProcedureDef(container, procDef, context, x, y) {
   const defId = nextBlockId();
+  const argumentIds = JSON.parse(procDef.mutation.argumentids || "[]");
+  const argumentNames = JSON.parse(procDef.mutation.argumentnames || "[]");
+  const procCode = argumentIds.reduce(
+    (acc, _id, i) => acc + (i > 0 ? " " : "") + "%s",
+    procDef.mutation.proccode
+  );
+  const prototypeId = nextBlockId();
+  const prototypeBlock = {
+    opcode: "procedures_prototype", next: null, parent: defId,
+    inputs: {}, fields: {}, shadow: true, topLevel: false,
+    mutation: serializeMutation({ ...procDef.mutation, proccode: procCode }),
+  };
+  // Argument reporters as shadow blocks inside the prototype's argument inputs
+  argumentIds.forEach((argId, i) => {
+    const reporterId = nextBlockId();
+    const reporterBlock = {
+      opcode: "argument_reporter_string_number", next: null, parent: prototypeId,
+      inputs: {}, fields: { VALUE: [argumentNames[i]] }, shadow: true, topLevel: false,
+    };
+    container[reporterId] = reporterBlock;
+    prototypeBlock.inputs[argId] = [1, reporterId];
+  });
   const defBlock = {
     opcode: "procedures_definition", next: null, parent: null,
-    inputs: {}, fields: {}, shadow: false, topLevel: true,
-    x, y, mutation: { ...procDef.mutation },
+    inputs: { custom_block: [1, prototypeId] }, fields: {}, shadow: false, topLevel: true,
+    x, y, mutation: serializeMutation(procDef.mutation),
   };
   container[defId] = defBlock;
+  container[prototypeId] = prototypeBlock;
   if (procDef.body && procDef.body.length > 0) {
     attachChain(defBlock, procDef.body, container, context);
   }
