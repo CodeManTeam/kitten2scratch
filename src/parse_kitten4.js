@@ -126,9 +126,9 @@ function convertBlock(kittenBlock, context) {
   }
   const childBlocks = kittenBlock[branchKey];
   if (Array.isArray(childBlocks) && childBlocks.length > 0) {
-    // Each entry in child_block array is actually a chain of linked blocks.
-    // In practice, Kitten4 child_block is an array with one chain.
-    if (childBlocks.length === 1 && childBlocks[0] && typeof childBlocks[0] === "object") {
+    // child_block may be [chain] (compile_result) or a chain (block_data_json);
+    // either way the first element is the head of a next_block-linked chain.
+    if (childBlocks[0] && typeof childBlocks[0] === "object" && childBlocks[0].type) {
       irBlock.branches.push(convertChain(childBlocks[0], context));
     }
   }
@@ -174,7 +174,25 @@ function resolveParam(value, context) {
 function applySpecial(type, irBlock, kittenBlock, context) {
   const params = kittenBlock.params || {};
 
+  // Normalize Kitten actor references to Scratch touching-menu values
+  if (type === "bump" || type === "bump_into") {
+    const normalize = (v) => v === "__mouse" || v === "__edge"
+      ? ({ __mouse: "_mouse", __edge: "_edge" })[v]
+      : context.__actorNameById && context.__actorNameById.get(v) || v;
+    const sprite2 = (irBlock.fields.SPRITE2 !== undefined ? irBlock.fields.SPRITE2 : params.sprite2);
+    delete irBlock.fields.TOUCHINGOBJECTMENU;
+    delete irBlock.fields.SPRITE2;
+    delete irBlock.inputs.TOUCHINGOBJECTMENU;
+    delete irBlock.inputs.SPRITE2;
+    irBlock.inputs.TOUCHINGOBJECTMENU = makeValue(normalize(sprite2), "string");
+  }
+
   switch (type) {
+    case "break": {
+      irBlock.fields.STOP_OPTION = ["this script"];
+      delete irBlock.inputs.STOP_OPTION;
+      break;
+    }
     case "math_arithmetic": {
       const op = params.type || params.OP;
       const scratchOp = { ADD: "+", MINUS: "-", MULTIPLY: "*", DIVIDE: "/", add: "+", minus: "-", multiply: "*", divide: "/" }[op] || "+";
@@ -189,6 +207,11 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       if (params.B !== undefined && !irBlock.inputs.B) {
         irBlock.inputs.B = isBlockRef(params.B) ? makeExpr(convertBlock(params.B, context)) : makeValue(Number(params.B) || 0, "number");
       }
+      // Scratch expects NUM1/NUM2 inputs; drop the nonstandard A/B/OP remnants.
+      if (irBlock.inputs.A) { irBlock.inputs.NUM1 = irBlock.inputs.A; delete irBlock.inputs.A; }
+      if (irBlock.inputs.B) { irBlock.inputs.NUM2 = irBlock.inputs.B; delete irBlock.inputs.B; }
+      delete irBlock.fields.OP;
+      delete irBlock.inputs.OP;
       break;
     }
     case "logic_compare": {
@@ -201,11 +224,17 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       if (params.B !== undefined && !irBlock.inputs.B) {
         irBlock.inputs.B = isBlockRef(params.B) ? makeExpr(convertBlock(params.B, context)) : makeValue(String(params.B), "string");
       }
+      if (irBlock.inputs.A) { irBlock.inputs.OPERAND1 = irBlock.inputs.A; delete irBlock.inputs.A; }
+      if (irBlock.inputs.B) { irBlock.inputs.OPERAND2 = irBlock.inputs.B; delete irBlock.inputs.B; }
+      delete irBlock.fields.OP;
+      delete irBlock.inputs.OP;
       break;
     }
     case "logic_operation": {
       const op = params.type || "AND";
       irBlock.opcode = (op === "OR" || op === "or") ? "operator_or" : "operator_and";
+      delete irBlock.fields.OP;
+      delete irBlock.inputs.OP;
       break;
     }
     case "math_single":
@@ -229,6 +258,9 @@ function applySpecial(type, irBlock, kittenBlock, context) {
         irBlock.inputs.NUM = isBlockRef(params.A) ? makeExpr(convertBlock(params.A, context)) : makeValue(Number(params.A) || 0, "number");
         delete irBlock.inputs.A;
       }
+      delete irBlock.fields.OPERATOR_SRC;
+      delete irBlock.inputs.A;
+      delete irBlock.inputs.OP;
       break;
     }
     case "variables_get":
@@ -371,14 +403,77 @@ function applySpecial(type, irBlock, kittenBlock, context) {
         : makeValue(String(textParam ?? ""), "string");
       break;
     }
-    case "arithmetic": {
-      // handled above in math_arithmetic case
+    case "stop": {
+      const scope = String(params.scope ?? "0");
+      const option = scope === "0" ? "this script" : scope === "2" ? "other scripts in sprite" : "all";
+      irBlock.fields.STOP_OPTION = [option];
+      delete irBlock.inputs.SCOPE;
+      break;
+    }
+    case "self_rotate_around": {
+      // Kitten rotates around a point; Scratch turns the sprite itself.
+      irBlock.opcode = "motion_turnright";
+      break;
+    }
+    case "controls_if": {
+      // block_data_json gives us DO0/ELSE statement chains via __extraStatements
+      if (kittenBlock.__extraStatements) {
+        const elseStmt = kittenBlock.__extraStatements.find(s => s.name === "ELSE");
+        if (elseStmt && elseStmt.chain && elseStmt.chain.length > 0) {
+          irBlock.branches[1] = elseStmt.chain;
+        }
+        const doStmt = kittenBlock.__extraStatements.find(s => s.name === "DO0");
+        if (doStmt && doStmt.chain && doStmt.chain.length > 0) {
+          irBlock.branches[0] = doStmt.chain;
+        }
+      }
+      break;
+    }
+    case "arithmetic":
+    case "math_arithmetic": {
+      const op2 = params.type || params.OP;
+      const scratchOp2 = { ADD: "+", MINUS: "-", MULTIPLY: "*", DIVIDE: "/", add: "+", minus: "-", multiply: "*", divide: "/" }[op2] || "+";
+      irBlock.opcode = { "+": "operator_add", "-": "operator_subtract", "*": "operator_multiply", "/": "operator_divide" }[scratchOp2] || "operator_add";
+      if (irBlock.inputs.A) { irBlock.inputs.NUM1 = irBlock.inputs.A; delete irBlock.inputs.A; }
+      if (irBlock.inputs.B) { irBlock.inputs.NUM2 = irBlock.inputs.B; delete irBlock.inputs.B; }
+      delete irBlock.fields.OP;
+      delete irBlock.inputs.OP;
       break;
     }
   }
 }
 
 // ---- Project-level parsing ----
+
+function costumeFromStyle(styleInfo, defaultName) {
+  if (!styleInfo) return null;
+  const url = styleInfo.url || styleInfo.cdn_url || "";
+  let dataFormat = "svg";
+  let inlineData = null;
+  let sourceFile = null;
+  if (url.startsWith("data:")) {
+    const m = url.match(/^data:([^;]+);base64,(.*)$/s);
+    if (m) {
+      const mime = m[1];
+      dataFormat = mime.includes("svg") ? "svg" : mime.includes("png") ? "png" : mime.includes("jpeg") || mime.includes("jpg") ? "jpg" : "png";
+      inlineData = Buffer.from(m[2], "base64");
+    }
+  } else if (url) {
+    sourceFile = url.split("/").pop();
+    const ext = (sourceFile.split(".").pop() || "").toLowerCase();
+    dataFormat = ext === "svg" ? "svg" : ext === "png" ? "png" : (ext === "jpg" || ext === "jpeg") ? "jpg" : ext === "mp3" ? "mp3" : ext === "wav" ? "wav" : "svg";
+  }
+  const center = styleInfo.rotate_center || styleInfo.pivot || { x: 0, y: 0 };
+  return {
+    name: styleInfo.name || "costume",
+    sourceFile,
+    dataFormat,
+    rotationCenterX: center.x || 0,
+    rotationCenterY: center.y || 0,
+    bitmapResolution: 1,
+    __data: inlineData,
+  };
+}
 
 function parseKitten4(projectJson) {
   const project = makeProject(projectJson.project_name || "Kitten Project", {
@@ -433,18 +528,9 @@ function parseKitten4(projectJson) {
     stage.name = stageScene.name || "Stage";
     const theatreStyles = theatre.styles || {};
     const styleInfo = theatreStyles[stageScene.current_style_id || (stageScene.styles || [])[0]];
-    if (styleInfo) {
-      const url = styleInfo.url || styleInfo.cdn_url || "";
-      const fileName = url.split("/").pop();
-      const ext = fileName.split(".").pop().toLowerCase();
-      stage.costumes.push({
-        name: styleInfo.name || "backdrop1",
-        sourceFile: fileName,
-        dataFormat: ext === "svg" ? "svg" : ext === "png" ? "png" : (ext === "jpg" || ext === "jpeg") ? "jpg" : "svg",
-        rotationCenterX: (styleInfo.pivot && styleInfo.pivot.x !== undefined ? styleInfo.pivot.x : 240),
-        rotationCenterY: (styleInfo.pivot && styleInfo.pivot.y !== undefined ? styleInfo.pivot.y : 180),
-        bitmapResolution: 1,
-      });
+    const stageCostume = costumeFromStyle(styleInfo, "backdrop1");
+    if (stageCostume) {
+      stage.costumes.push(stageCostume);
     }
     project.stage = stage;
   }
@@ -466,17 +552,8 @@ function parseKitten4(projectJson) {
     for (const styleId of styleIds) {
       const styleInfo = theatreStyles[styleId];
       if (!styleInfo) continue;
-      const url = styleInfo.url || styleInfo.cdn_url || "";
-      const fileName = url.split("/").pop();
-      const ext = fileName.split(".").pop().toLowerCase();
-      sprite.costumes.push({
-        name: styleInfo.name || styleId,
-        sourceFile: fileName,
-        dataFormat: ext === "svg" ? "svg" : ext === "png" ? "png" : (ext === "jpg" || ext === "jpeg") ? "jpg" : "svg",
-        rotationCenterX: (styleInfo.pivot && styleInfo.pivot.x !== undefined ? styleInfo.pivot.x : 0),
-        rotationCenterY: (styleInfo.pivot && styleInfo.pivot.y !== undefined ? styleInfo.pivot.y : 0),
-        bitmapResolution: 1,
-      });
+      const costume = costumeFromStyle(styleInfo, styleId);
+      if (costume) sprite.costumes.push(costume);
     }
 
     project.sprites.push(sprite);
@@ -487,6 +564,18 @@ function parseKitten4(projectJson) {
   const entityMap = new Map();
   for (const entity of compileResult) {
     entityMap.set(entity.id, entity);
+  }
+  const blockDataGraph = require("./block_data_graph");
+  const actorBlockData = {};
+  const actorNameById = new Map();
+  for (const [actorId, actor] of Object.entries(actors)) {
+    actorNameById.set(actorId, actor.name || actorId);
+  }
+  for (const [actorId, actor] of Object.entries(actors)) {
+    if (actor.block_data_json && actor.block_data_json.blocks) {
+      const chains = blockDataGraph.blockDataJsonToChains(actor.block_data_json);
+      actorBlockData[actorId] = chains.map(chain => ({ compiled_block_map: { root: chain } }));
+    }
   }
 
   // Register procedure definitions per sprite (before converting scripts, so
@@ -558,12 +647,18 @@ function parseKitten4(projectJson) {
 
   // Attach actor scripts to sprites
   for (const sprite of project.sprites) {
-    let entity = null;
-    entity = entityMap.get(sprite.__actorId) || null;
-    if (entity) {
-      for (const [rootId, rootBlock] of Object.entries(entity.compiled_block_map || {})) {
-        const chain = convertChain(rootBlock, { project, target: sprite, procedures: sprite.__procedures });
+    let entities = [];
+    if (entityMap.get(sprite.__actorId)) {
+      entities = [entityMap.get(sprite.__actorId)];
+    } else if (actorBlockData[sprite.__actorId]) {
+      entities = actorBlockData[sprite.__actorId];
+    }
+    if (entities) {
+      for (const entity of entities) {
+        for (const [rootId, rootBlock] of Object.entries(entity.compiled_block_map || {})) {
+        const chain = convertChain(rootBlock, { project, target: sprite, procedures: sprite.__procedures, __actorNameById: actorNameById });
         if (chain.length > 0) sprite.blocks.push(chain);
+        }
       }
     }
   }

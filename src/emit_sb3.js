@@ -180,12 +180,20 @@ function emitProject(project) {
   // Compute md5ext for each costume/sound from sourceFile
   const crypto = require("crypto");
   const projectDir = project.meta.projectDir || null;
+  const allTargets = [project.stage, ...project.sprites].filter(Boolean);
   const assetFiles = new Map(); // sourceFile -> {md5ext, data}
   if (projectDir) {
     const assetDir = require("path").join(projectDir, "assets");
-    const allTargets = [project.stage, ...project.sprites].filter(Boolean);
     for (const target of allTargets) {
       for (const costume of target.costumes) {
+        if (costume.__data) {
+          const md5 = crypto.createHash("md5").update(costume.__data).digest("hex");
+          const md5ext = md5 + "." + costume.dataFormat;
+          assetFiles.set("__inline__" + md5ext, { md5ext, data: costume.__data });
+          costume.sourceFile = "__inline__" + md5;
+          costume.md5ext = md5ext;
+          continue;
+        }
         if (!costume.sourceFile) continue;
         if (assetFiles.has(costume.sourceFile)) { costume.md5ext = assetFiles.get(costume.sourceFile).md5ext; continue; }
         const fp = require("path").join(assetDir, costume.sourceFile);
@@ -206,6 +214,16 @@ function emitProject(project) {
         const md5ext = md5 + "." + (sound.dataFormat || "mp3");
         assetFiles.set(sound.sourceFile, { md5ext, data });
         sound.md5ext = md5ext;
+      }
+    }
+  }
+  // Fallback: any costume without md5ext gets the blank SVG so assetId stays valid
+  for (const target of allTargets) {
+    for (const costume of target.costumes) {
+      if (!costume.md5ext) {
+        costume.md5ext = BLANK_MD5EXT;
+        costume.dataFormat = "svg";
+        costume.name = costume.name || "costume1";
       }
     }
   }

@@ -125,6 +125,8 @@ const BLOCK_MAP = {
   // ===== Sound =====
   audio_play: { opcode: "sound_play", map: { SOUND_MENU: F("audio") } },
   audio_stop: { opcode: "sound_stopallsounds", map: {} },
+  stop: { opcode: "control_stop", map: { STOP_OPTION: null }, special: "stop" },
+  self_rotate_around: { opcode: "motion_turnright", map: { DEGREES: E("degrees") }, special: "rotate_around" },
   change_volume_or_rate: { opcode: "sound_setvolumeto", map: { VOLUME: E("volume") } },
 
   // ===== Pen =====
@@ -138,8 +140,8 @@ const BLOCK_MAP = {
   mouse_down: { opcode: "sensing_mousedown", map: { MOUSE_EVENT_TYPE: F("mouse_event_type") } },
   mouse_click: { opcode: "sensing_mousedown", map: { MOUSE_EVENT_TYPE: F("mouse_event_type") } },
   check_key: { opcode: "sensing_keypressed", map: { KEY_OPTION: E("key") } },
-  bump: { opcode: "sensing_touchingobject", map: { TOUCHINGOBJECTMENU: F("sprite1"), SPRITE2: F("sprite2") } },
-  bump_into: { opcode: "sensing_touchingobject", map: { TOUCHINGOBJECTMENU: F("sprite1"), SPRITE2: F("sprite2") } },
+  bump: { opcode: "sensing_touchingobject", map: { TOUCHINGOBJECTMENU: F("sprite1"), SPRITE2: F("sprite2") }, special: "bump" },
+  bump_into: { opcode: "sensing_touchingobject", map: { TOUCHINGOBJECTMENU: F("sprite1"), SPRITE2: F("sprite2") }, special: "bump" },
   bump_into_color: { opcode: "sensing_touchingcolor", map: { COLOR: E("color") } },
   get_answer: { opcode: "sensing_answer", map: {} },
   get_choice_or_index: { opcode: "sensing_answer", map: {} },

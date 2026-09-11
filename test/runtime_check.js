@@ -13,14 +13,14 @@ async function main() {
   vm.attachStorage(storage);
   await vm.loadProject(fs.readFileSync(process.argv[2] || "out/turbowarp_test.sb3"));
   const ces = [];
-  vm.runtime.on("COMPILE_ERROR", (args) => ces.push(args));
+  vm.runtime.on("COMPILE_ERROR", (target, error) => ces.push({ target: target.getName(), stack: error.stack }));
   const errs = [];
   vm.runtime.on("RUNTIME_ERROR_DISMISSABLE", (e) => errs.push(String(e)));
   vm.start();
   vm.greenFlag();
   await new Promise(r => setTimeout(r, 1500));
   console.log("compile_errors=" + ces.length + " runtime_errors=" + errs.length);
-  if (ces.length) console.log(ces.slice(0, 3).map(c => (c.blockOpcode || "?") + " " + (c.errorMessage || "")).join("\n"));
+  if (ces.length) console.log(ces.slice(0, 3).map(c => c.target + "\n" + c.stack).join("\n"));
   if (errs.length) console.log(errs.slice(0, 3).join("\n"));
   vm.runtime.dispose();
 }
