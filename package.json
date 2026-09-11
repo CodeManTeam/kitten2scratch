@@ -1,0 +1,17 @@
+{
+  "name": "kitten2scratch",
+  "version": "1.0.0",
+  "description": "Kitten/Kitten4/KittenN to Scratch/TurboWarp converter",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/run_tests.js",
+    "convert": "node cli.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "jszip": "^3.10.1"
+  }
+}
