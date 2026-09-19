@@ -139,6 +139,17 @@ function convertBlock(kittenBlock, context) {
     }
   }
 
+  // XML C-blocks can contain several named statements. Preserve additional
+  // branches for generic mappings such as repeat/warp, while the dedicated
+  // if handler below keeps its DO0/ELSE semantics.
+  if (!type.startsWith("control_if") && !type.startsWith("controls_if") && Array.isArray(kittenBlock.__statements)) {
+    const statements = kittenBlock.__statements;
+    irBlock.branches = statements.map(statement => {
+      const head = statement.chain?.[0];
+      return head ? convertChain(head, context) : [];
+    }).filter(chain => chain.length > 0);
+  }
+
   // Handle special cases
   if (mapping.special) {
     applySpecial(type, irBlock, kittenBlock, context);
@@ -328,18 +339,9 @@ function buildOrbitChain(kittenBlock, context, angleInput) {
 
 function applySpecial(type, irBlock, kittenBlock, context) {
   const params = kittenBlock.params || {};
-  const source = context.source || "kitten4";
   const k3Scale = (input) => {
-    if (source !== "kitten3" || !input) return input;
-    if (input.type === "expr" && input.block?.opcode === "operator_multiply") {
-      const left = input.block.inputs?.NUM1;
-      const right = input.block.inputs?.NUM2;
-      const isTwo = (value) => value?.type === "value" && Number(value.value) === 2;
-      if (isTwo(right) && left) return left;
-      if (isTwo(left) && right) return right;
-    }
-    if (input.type !== "value") return input;
-    if (typeof input.value === "number") input.value /= 2;
+    // K3 theatre coordinates already use the project's native stage space.
+    // The old fixed 480x360 Scratch bridge scaling is not used by TurboWarp.
     return input;
   };
 
@@ -445,6 +447,15 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       // convention. The official Scratch bridge serializes right turns as
       // `0 - degrees`, so reverse the value on the way back.
       irBlock.inputs.DEGREES = negate(rawDegrees);
+      break;
+    }
+    case "mirror": {
+      // Kitten's mirror block carries a target selector, not a turn angle.
+      // Scratch has no direct mirror primitive; use a 180-degree turn without
+      // leaking the selector into motion_turnright's input list.
+      delete irBlock.inputs.SPRITE;
+      delete irBlock.fields.SPRITE;
+      irBlock.inputs.DEGREES = makeValue(180, "number");
       break;
     }
     case "break": {
@@ -626,11 +637,14 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       break;
     }
     case "procedures_2_callnoreturn":
-    case "procedures_2_return_value": {
-      const procName = kittenBlock.procedure_name || params.procedure_name || "function";
+    case "procedures_2_return_value":
+    case "procedures_2_callreturn": {
+      const procName = kittenBlock.procedure_name || params.procedure_name || params.NAME || "function";
       const procTable = context.procedures || (context.project && context.project.procedures);
       const procDef = procTable && procTable.get(procName);
-      const paramNames = procDef ? procDef.paramNames : Object.keys(params);
+      const argKeys = Object.keys(params).filter(key => /^ARG\d+$/i.test(key))
+        .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+      const paramNames = procDef ? procDef.paramNames : argKeys;
       const callProccode = procName + paramNames.map(() => " %s").join("");
       irBlock.mutation = {
         tagName: "mutation",
@@ -641,7 +655,7 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       };
       // Convert each argument value in declaration order into a call input.
       paramNames.forEach((pn, i) => {
-        const v = params[pn];
+        const v = params[argKeys[i]] ?? params[pn];
         const irInput = isBlockRef(v) ? makeExpr(convertBlock(v, context)) : makeValue(String(v ?? ""), "string");
         irBlock.inputs[`arg${i}`] = irInput;
       });
@@ -851,6 +865,10 @@ function costumeFromStyle(styleInfo, defaultName) {
     dataFormat,
     rotationCenterX: rcx,
     rotationCenterY: rcy,
+    __kittenRotateCenter: {
+      x: Number(center.x || 0),
+      y: Number(center.y || 0),
+    },
     bitmapResolution: 1,
     __data: inlineData,
   };

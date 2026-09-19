@@ -57,6 +57,10 @@ function addCostumes(target, styles, styleIds, currentStyleId) {
       dataFormat: style.is_svg ? "svg" : "png",
       rotationCenterX,
       rotationCenterY,
+      __kittenRotateCenter: {
+        x: Number(center.x || 0),
+        y: Number(center.y || 0),
+      },
       bitmapResolution: 1,
       md5ext: null,
     };
@@ -74,7 +78,9 @@ function addCostumes(target, styles, styleIds, currentStyleId) {
 
 function addScripts(target, blocksXml, context) {
   if (!blocksXml || typeof blocksXml !== "string") return;
-  for (const root of parseBlocksXml(blocksXml)) {
+  const roots = context.rootBlocks || parseBlocksXml(blocksXml);
+  for (const root of roots) {
+    if (root.type === "procedures_2_defnoreturn") continue;
     const convertedRoot = sceneActivationRoot(
       root,
       context.sceneId,
@@ -83,6 +89,55 @@ function addScripts(target, blocksXml, context) {
     const chain = convertChain(convertedRoot, { ...context, source: "kitten3" });
     if (chain.length) target.blocks.push(chain);
   }
+}
+
+function procedureName(root) {
+  return String(root?.params?.NAME || root?.procedure_name || root?.mutation?.name || "function");
+}
+
+function procedureParamNames(root) {
+  const args = root?.mutation?.args;
+  if (Array.isArray(args) && args.length) return args.map(String);
+  return Object.keys(root?.params || {})
+    .filter(key => /^PARAM\d+$/i.test(key))
+    .sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)))
+    .map(key => String(root.params[key]?.params?.param_name || root.params[key]?.params?.name || ""))
+    .filter(Boolean);
+}
+
+function collectProcedures(target, roots, context) {
+  const definitions = (roots || []).filter(root => root?.type === "procedures_2_defnoreturn");
+  if (!definitions.length) return new Map();
+
+  const procedures = new Map();
+  for (const root of definitions) {
+    const name = procedureName(root);
+    const paramNames = procedureParamNames(root);
+    procedures.set(name, {
+      id: name,
+      name,
+      paramNames,
+      mutation: {
+        tagName: "mutation",
+        children: [],
+        proccode: name + paramNames.map(() => " %s").join(""),
+        argumentids: JSON.stringify(paramNames.map((_, i) => `arg${i}`)),
+        argumentnames: JSON.stringify(paramNames),
+        argumentdefaults: JSON.stringify(paramNames.map(() => "")),
+        warp: "false",
+      },
+      __root: root,
+    });
+  }
+
+  const conversionContext = { ...context, target, procedures, source: "kitten3" };
+  for (const proc of procedures.values()) {
+    const body = proc.__root.child_block?.[0];
+    proc.__bodyChain = body ? convertChain(body, conversionContext) : [];
+    delete proc.__root;
+  }
+  target.__procedures = procedures;
+  return procedures;
 }
 
 function sceneActivationRoot(rootBlock, sceneId, active) {
@@ -130,6 +185,10 @@ function makeCostumeFromStyle(style, styleId) {
     dataFormat: style.is_svg ? "svg" : "png",
     rotationCenterX: style.is_svg ? (width + Number(center.x || 0)) / 2 : width / 2 + Number(center.x || 0),
     rotationCenterY: style.is_svg ? (height + Number(center.y || 0)) / 2 : height / 2 - Number(center.y || 0),
+    __kittenRotateCenter: {
+      x: Number(center.x || 0),
+      y: Number(center.y || 0),
+    },
     bitmapResolution: 1,
     md5ext: null,
   };
@@ -201,19 +260,6 @@ function parseKitten3(projectJson) {
     styles,
     makeCostume: makeCostumeFromStyle,
   });
-  for (const sceneId of sceneIds) {
-    const scene = scenes[sceneId];
-    if (!scene || !scene.blocksXML) continue;
-    addScripts(stage, scene.blocksXML, {
-      project,
-      target: stage,
-      __styleNameById: styleNameById,
-      sceneId,
-      activeSceneId: stageSceneId,
-      __sceneBackdropById: sceneBackdrops.sceneBackdropById,
-      __sceneBackdropByName: sceneBackdrops.sceneBackdropByName,
-    });
-  }
   stage.variables = project.variables.filter(variable => variable.isGlobal === false && variable.currentEntity === stageSceneId);
   addSounds(stage, projectJson.audio);
   project.stage = stage;
@@ -222,13 +268,15 @@ function parseKitten3(projectJson) {
   for (const [id, actor] of objectEntries(actors)) actorNameById.set(id, actor.name || id);
   let layerOrder = 1;
   const usedSpriteNames = new Set();
+  const actorRootsById = new Map();
   for (const [actorId, actor] of objectEntries(actors)) {
     const sprite = makeTarget(uniqueSpriteName(actor.name || actorId, usedSpriteNames), false);
     sprite.__actorId = actorId;
     sprite.__sceneId = actor.scene || null;
     sprite.__sceneVisible = actor.visible !== false;
     sprite.x = Number(actor.x || 0) * sx;
-    sprite.y = -Number(actor.y || 0) * sy;
+    // K3 theatre coordinates use the same Y-up convention as Scratch.
+    sprite.y = Number(actor.y || 0) * sy;
     sprite.size = Number(actor.scale ?? 100);
     // K3 stores actor rotation in radians; Scratch stores direction in degrees.
     sprite.direction = 90 - Number(actor.rotation || 0) * 180 / Math.PI;
@@ -236,16 +284,8 @@ function parseKitten3(projectJson) {
     sprite.draggable = actor.draggable === true;
     sprite.layerOrder = layerOrder++;
     addCostumes(sprite, styles, actor.styles, actor.current_style_id);
-    addScripts(sprite, actor.blocksXML, {
-      project,
-      target: sprite,
-      __actorNameById: actorNameById,
-      __styleNameById: styleNameById,
-      __sceneBackdropById: sceneBackdrops.sceneBackdropById,
-      __sceneBackdropByName: sceneBackdrops.sceneBackdropByName,
-      sceneId: actor.scene,
-      activeSceneId: stageSceneId,
-    });
+    actorRootsById.set(actorId, parseBlocksXml(actor.blocksXML || ""));
+    sprite.__blocksXML = actor.blocksXML || "";
     for (const [id, raw] of objectEntries(actor.variables)) {
       const info = valueInfo(id, raw, cloudIds.has(id));
       const variable = makeVariable(id, info.name, info.value, info.cloud, info.isList, false);
@@ -263,6 +303,73 @@ function parseKitten3(projectJson) {
     );
     project.sprites.push(sprite);
   }
+
+  // K3 keeps custom procedure definitions inside each entity's blocksXML.
+  // Register them before converting calls, then omit the definition blocks from
+  // normal scripts so the emitter can produce real Scratch prototypes.
+  const stageRootsByScene = new Map();
+  const stageProcedures = new Map();
+  for (const sceneId of sceneIds) {
+    const scene = scenes[sceneId];
+    const roots = parseBlocksXml(scene?.blocksXML || "");
+    stageRootsByScene.set(sceneId, roots);
+    const found = collectProcedures(stage, roots, {
+      project,
+      target: stage,
+      sceneId,
+      activeSceneId: stageSceneId,
+    });
+    for (const [name, proc] of found) stageProcedures.set(name, proc);
+  }
+  if (stageProcedures.size) {
+    stage.__procedures = stageProcedures;
+    project.procedures = stageProcedures;
+  }
+  for (const sprite of project.sprites) {
+    const roots = actorRootsById.get(sprite.__actorId) || [];
+    collectProcedures(sprite, roots, {
+      project,
+      target: sprite,
+      __actorNameById: actorNameById,
+      __styleNameById: styleNameById,
+      sceneId: sprite.__sceneId,
+      activeSceneId: stageSceneId,
+    });
+  }
+
+  for (const [sceneId, roots] of stageRootsByScene) {
+    const scene = scenes[sceneId];
+    addScripts(stage, scene?.blocksXML, {
+      project,
+      target: stage,
+      rootBlocks: roots,
+      procedures: stage.__procedures,
+      __styleNameById: styleNameById,
+      sceneId,
+      activeSceneId: stageSceneId,
+      __sceneBackdropById: sceneBackdrops.sceneBackdropById,
+      __sceneBackdropByName: sceneBackdrops.sceneBackdropByName,
+    });
+  }
+
+  for (const sprite of project.sprites) {
+    const roots = actorRootsById.get(sprite.__actorId) || [];
+    const actor = actors[sprite.__actorId] || {};
+    addScripts(sprite, actor.blocksXML, {
+      project,
+      target: sprite,
+      rootBlocks: roots,
+      procedures: sprite.__procedures,
+      __actorNameById: actorNameById,
+      __styleNameById: styleNameById,
+      __sceneBackdropById: sceneBackdrops.sceneBackdropById,
+      __sceneBackdropByName: sceneBackdrops.sceneBackdropByName,
+      sceneId: sprite.__sceneId,
+      activeSceneId: stageSceneId,
+    });
+  }
+
+  for (const sprite of project.sprites) delete sprite.__blocksXML;
 
   return project;
 }

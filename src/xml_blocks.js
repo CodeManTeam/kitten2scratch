@@ -128,6 +128,9 @@ function xmlBlockToKitten(node) {
   }
   if (convertedStatements.length) {
     block.child_block = convertedStatements[0].chain;
+    // Keep every named statement. Older code retained only the first one,
+    // which silently discarded ELSE/DO0/STACK branches from K3 workspaces.
+    block.__statements = convertedStatements;
     if (convertedStatements.length > 1) block.__extraStatements = convertedStatements;
   }
 

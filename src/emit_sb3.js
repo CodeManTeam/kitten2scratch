@@ -24,13 +24,15 @@ function serializeMutation(mutation) {
   if (!mutation) return null;
   const out = {};
   for (const [key, value] of Object.entries(mutation)) {
-    if (key === "tagName") continue;
     if (typeof value === "boolean") {
       out[key] = value ? "true" : "false";
     } else {
       out[key] = value;
     }
   }
+  // TurboWarp's workspace XML serializer reads this runtime metadata when
+  // rebuilding custom procedure blocks from project.json.
+  if (!out.tagName) out.tagName = "mutation";
   if (!Array.isArray(out.children)) out.children = [];
   return out;
 }
@@ -180,10 +182,13 @@ function emitProcedureDef(container, procDef, context, x, y) {
   const defId = nextBlockId();
   const argumentIds = JSON.parse(procDef.mutation.argumentids || "[]");
   const argumentNames = JSON.parse(procDef.mutation.argumentnames || "[]");
-  const procCode = argumentIds.reduce(
-    (acc, _id, i) => acc + (i > 0 ? " " : "") + "%s",
-    procDef.mutation.proccode
-  );
+  const baseProcCode = String(procDef.mutation.proccode || procDef.name || "function");
+  const existingSlots = (baseProcCode.match(/%s/g) || []).length;
+  const procCode = existingSlots >= argumentIds.length
+    ? baseProcCode
+    : argumentIds.slice(existingSlots).reduce(
+      (acc) => acc + " %s", baseProcCode
+    );
   const prototypeId = nextBlockId();
   const prototypeBlock = {
     opcode: "procedures_prototype", next: null, parent: defId,
@@ -195,7 +200,7 @@ function emitProcedureDef(container, procDef, context, x, y) {
     const reporterId = nextBlockId();
     const reporterBlock = {
       opcode: "argument_reporter_string_number", next: null, parent: prototypeId,
-      inputs: {}, fields: { VALUE: [argumentNames[i]] }, shadow: true, topLevel: false,
+      inputs: {}, fields: { VALUE: [argumentNames[i], null] }, shadow: true, topLevel: false,
     };
     container[reporterId] = reporterBlock;
     prototypeBlock.inputs[argId] = [1, reporterId];
@@ -203,12 +208,13 @@ function emitProcedureDef(container, procDef, context, x, y) {
   const defBlock = {
     opcode: "procedures_definition", next: null, parent: null,
     inputs: { custom_block: [1, prototypeId] }, fields: {}, shadow: false, topLevel: true,
-    x, y, mutation: serializeMutation(procDef.mutation),
+    x, y,
   };
   container[defId] = defBlock;
   container[prototypeId] = prototypeBlock;
-  if (procDef.body && procDef.body.length > 0) {
-    attachChain(defBlock, procDef.body, container, context);
+  const body = procDef.__bodyChain || procDef.body;
+  if (body && body.length > 0) {
+    attachChain(defBlock, body, container, context);
   }
   return defId;
 }
@@ -261,6 +267,35 @@ function emitProject(project) {
   const crypto = require("crypto");
   const projectDir = project.meta.projectDir || null;
   const allTargets = [project.stage, ...project.sprites].filter(Boolean);
+
+  // Kitten stores rotate_center as an offset from the image center, while
+  // SB3 stores an absolute pixel position from the upper-left corner. Remote
+  // assets are hydrated before emitProject, so use their real dimensions here
+  // instead of guessing from incomplete style metadata.
+  const readImageDimensions = (data, format) => {
+    if (!Buffer.isBuffer(data)) return null;
+    if (format === "png" && data.length >= 24 && data.toString("ascii", 1, 4) === "PNG") {
+      return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+    }
+    if (format === "svg") {
+      const text = data.toString("utf8", 0, 8192);
+      const width = text.match(/\bwidth=["']([\d.]+)/i);
+      const height = text.match(/\bheight=["']([\d.]+)/i);
+      if (width && height) return { width: Number(width[1]), height: Number(height[1]) };
+      const viewBox = text.match(/\bviewBox=["']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)/i);
+      if (viewBox) return { width: Number(viewBox[1]), height: Number(viewBox[2]) };
+    }
+    return null;
+  };
+  for (const target of allTargets) {
+    for (const costume of target.costumes) {
+      const offset = costume.__kittenRotateCenter;
+      const dimensions = readImageDimensions(costume.__data, costume.dataFormat);
+      if (!offset || !dimensions || !dimensions.width || !dimensions.height) continue;
+      costume.rotationCenterX = dimensions.width / 2 + Number(offset.x || 0);
+      costume.rotationCenterY = dimensions.height / 2 - Number(offset.y || 0);
+    }
+  }
   const assetFiles = new Map(); // sourceFile -> {md5ext, data}
   if (projectDir) {
     const assetDir = require("path").join(projectDir, "assets");
