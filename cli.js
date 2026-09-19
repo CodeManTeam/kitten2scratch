@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
  * kitten2scratch CLI
- * Usage: node cli.js <input.json|.bcm4|.bcmkn> [output.sb3]
+ * Usage: node cli.js <input.json|.bcm4|.bcmkn> [output.sb3] [--decrypted-json path]
  */
 
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { parseKitten4 } = require("./src/parse_kitten4");
 const { parseKitten3 } = require("./src/parse_kitten3");
 const { parseKittenN } = require("./src/parse_kittenn");
@@ -39,6 +40,37 @@ async function hydrateRemoteAssets(project) {
   }
 }
 
+function decryptBcmkn(encryptedText) {
+  let stripped = encryptedText.trim();
+  if (stripped.charCodeAt(0) === 0xFEFF) stripped = stripped.slice(1).trim();
+  if (stripped.startsWith("{") || stripped.startsWith("[")) return stripped;
+
+  const b64_text = stripped.split("").reverse().join("");
+  const raw = Buffer.from(b64_text, "base64");
+  if (raw.length <= 28) throw new Error("input is too short to be a valid AES-GCM bcmkn payload");
+
+  const iv = raw.slice(0, 12);
+  const ciphertext = raw.slice(12, raw.length - 16);
+  const authTag = raw.slice(raw.length - 16);
+
+  let salt = "";
+  for (let i = 0; i < 31; i++) salt += String.fromCharCode(i);
+  const saltBuf = Buffer.from(salt, "utf-8");
+
+  const errors = [];
+  for (const algorithm of ["sha256", "sha512"]) {
+    try {
+      const key = crypto.createHash(algorithm).update(saltBuf).digest().slice(0, 32);
+      const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+      decipher.setAuthTag(authTag);
+      return decipher.update(ciphertext, undefined, "utf8") + decipher.final("utf8");
+    } catch (err) {
+      errors.push(`${algorithm}: ${err.message}`);
+    }
+  }
+  throw new Error("decryption failed; " + errors.join(" | "));
+}
+
 function detectFormat(filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === ".bcmkn") return "kittenn";
@@ -56,12 +88,17 @@ function detectFormat(filePath, content) {
 async function main() {
   const args = process.argv.slice(2);
   if (args.length < 1) {
-    console.error("Usage: node cli.js <input.json|.bcm4|.bcmkn> [output.sb3]");
+    console.error("Usage: node cli.js <input.json|.bcm4|.bcmkn> [output.sb3] [--decrypted-json path]");
     process.exit(1);
   }
 
   const inputPath = path.resolve(args[0]);
-  const outputPath = args[1] ? path.resolve(args[1]) : inputPath.replace(/\.[^.]+$/, ".sb3");
+  const outputPath = args[1] && !args[1].startsWith("--")
+    ? path.resolve(args[1])
+    : inputPath.replace(/\.[^.]+$/, ".sb3");
+  const decryptedFlag = args.indexOf("--decrypted-json");
+  const decryptedOutputPath = decryptedFlag >= 0 && args[decryptedFlag + 1]
+    ? path.resolve(args[decryptedFlag + 1]) : null;
 
   let content;
   try {
@@ -72,8 +109,23 @@ async function main() {
   }
 
   let parsed;
-  try { parsed = JSON.parse(content); } catch {
-    console.error("Input is not valid JSON. For .bcmkn, decrypt it first with tools/decrypt_bcmkn.py");
+  try {
+    const isBcmkn = inputPath.toLowerCase().endsWith(".bcmkn");
+    if (isBcmkn || (!content.trim().startsWith("{") && !content.trim().startsWith("["))) {
+      try {
+        content = decryptBcmkn(content);
+        console.log("Successfully decrypted bcmkn payload.");
+      } catch (decErr) {
+        if (isBcmkn) throw decErr;
+      }
+    }
+    parsed = JSON.parse(content);
+    if (decryptedOutputPath) {
+      fs.writeFileSync(decryptedOutputPath, content, "utf8");
+      console.log(`Decrypted JSON: ${decryptedOutputPath}`);
+    }
+  } catch (err) {
+    console.error(`Input is not valid JSON and could not be decrypted: ${err.message}`);
     process.exit(1);
   }
 
@@ -84,14 +136,15 @@ async function main() {
   }
   console.log(`Detected format: ${format}`);
 
+  parsed.__sourceFile = inputPath;
   let project;
   if (format === "kitten4" || format === "kitten3") {
-    parsed.__sourceFile = inputPath;
     project = format === "kitten3" ? parseKitten3(parsed) : parseKitten4(parsed);
     project.meta.projectDir = require("path").dirname(inputPath);
   } else {
     project = parseKittenN(parsed);
   }
+  project.meta.projectDir = path.dirname(inputPath);
 
   // K3 stores CDN URLs in theatre.styles/audio. Package them into SB3 so the
   // result remains self-contained instead of relying on the CDN at runtime.

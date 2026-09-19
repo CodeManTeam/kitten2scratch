@@ -163,6 +163,14 @@ function broadcastName(value) {
   return value;
 }
 
+function listName(value) {
+  if (isBlockRef(value)) {
+    const params = value.params || {};
+    return params.VAR ?? params.variable ?? params.list ?? params.LIST ?? "";
+  }
+  return value;
+}
+
 function walkKittenBlocks(block, fn) {
   if (!block || typeof block !== "object") return;
   if (Array.isArray(block)) {
@@ -373,9 +381,14 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       delete irBlock.inputs.MESSAGE;
       break;
     }
-    case "costume_by_id": {
+    case "costume_by_id":
+    case "set_costume_by_id":
+    case "set_costume": {
       const id = params.sid || params.style_id || params.costume || params.style || "";
-      irBlock.fields.COSTUME = context.__styleNameById?.get(String(id)) || String(id);
+      const name = context.__styleNameById?.get(String(id)) || String(id);
+      irBlock.inputs.COSTUME = makeValue(name, "string");
+      delete irBlock.inputs.SID;
+      delete irBlock.fields.COSTUME;
       break;
     }
     case "dialog_input": {
@@ -395,6 +408,13 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       if (color !== undefined && !irBlock.inputs.COLOR) {
         irBlock.inputs.COLOR = isBlockRef(color) ? makeExpr(convertBlock(color, context)) : makeValue(String(color), "string");
       }
+      break;
+    }
+    case "set_layer_with_pen": {
+      // K3's pen-layer block has no Scratch equivalent. Keep it as a valid
+      // pen color operation instead of emitting the unsupported POSITION input.
+      delete irBlock.inputs.POSITION;
+      irBlock.inputs.COLOR ||= makeValue("#000000", "string");
       break;
     }
     case "pen_size": {
@@ -534,7 +554,11 @@ function applySpecial(type, irBlock, kittenBlock, context) {
     case "list_item":
     case "lists_get_value":
     case "pure_list_get": {
-      irBlock.fields.LIST = params.VAR || params.list || "<unknown>";
+      irBlock.fields.LIST = listName(params.VAR ?? params.list) || "<unknown>";
+      delete irBlock.inputs.VAR;
+      delete irBlock.inputs.LIST;
+      delete irBlock.inputs.VALUE;
+      delete irBlock.inputs.TYPE;
       if (params.INDEX !== undefined && !irBlock.inputs.INDEX) {
         irBlock.inputs.INDEX = isBlockRef(params.INDEX) ? makeExpr(convertBlock(params.INDEX, context)) : makeValue(Number(params.INDEX) || 1, "number");
       }
@@ -549,19 +573,25 @@ function applySpecial(type, irBlock, kittenBlock, context) {
     case "lists_length":
     case "lists_is_exist":
     case "show_hide_list": {
-      const listName = params.VAR || params.list || params.LIST || "<unknown>";
+      const listRef = params.VAR ?? params.list ?? params.LIST;
+      const listId = listName(listRef) || "<unknown>";
       if (type === "show_hide_list") {
-        irBlock.fields.LIST = listName;
+        irBlock.fields.LIST = listId;
         irBlock.opcode = String(params.FUNC || params.func || "show").toLowerCase() === "hide"
           ? "data_hidelist" : "data_showlist";
         delete irBlock.inputs.FUNC;
         delete irBlock.inputs.VAR;
         break;
       }
-      if (type === "lists_get" || type === "lists_length") irBlock.fields.LIST = listName;
-      if (type === "lists_index_of" || type === "lists_is_exist") irBlock.fields.LIST = listName;
+      irBlock.fields.LIST = listId;
+      delete irBlock.inputs.VAR;
+      delete irBlock.inputs.VALUE;
+      delete irBlock.inputs.LIST;
+      if (type === "lists_get") {
+        irBlock.opcode = "data_listcontents";
+        break;
+      }
       if (type === "lists_append") {
-        irBlock.fields.LIST = listName;
         const item = params.ITEM ?? params.item ?? params.VALUE ?? params.value;
         if (item !== undefined) irBlock.inputs.ITEM = isBlockRef(item)
           ? makeExpr(convertBlock(item, context)) : makeValue(String(item), "string");
@@ -570,7 +600,6 @@ function applySpecial(type, irBlock, kittenBlock, context) {
         if (index !== undefined) irBlock.inputs.INDEX = isBlockRef(index)
           ? makeExpr(convertBlock(index, context)) : makeValue(Number(index) || 1, "number");
       } else if (type === "lists_insert") {
-        irBlock.fields.LIST = listName;
         const item = params.ITEM ?? params.item ?? params.VALUE ?? params.value;
         const index = params.INDEX ?? params.index ?? params.N;
         if (item !== undefined) irBlock.inputs.ITEM = isBlockRef(item)
@@ -578,7 +607,6 @@ function applySpecial(type, irBlock, kittenBlock, context) {
         if (index !== undefined) irBlock.inputs.INDEX = isBlockRef(index)
           ? makeExpr(convertBlock(index, context)) : makeValue(Number(index) || 1, "number");
       } else if (type === "lists_replace") {
-        irBlock.fields.LIST = listName;
         const item = params.ITEM ?? params.item ?? params.VALUE ?? params.value;
         const index = params.INDEX ?? params.index ?? params.N;
         if (item !== undefined) irBlock.inputs.ITEM = isBlockRef(item)

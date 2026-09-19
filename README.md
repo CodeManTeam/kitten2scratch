@@ -55,7 +55,7 @@ Codemao's ecosystem has evolved significantly. This tool handles three major gen
 
 ### 3. KittenN (Mobile/Neko)
 - **Identifiers**: `.bcmkn`, `nekoBlockJsonList`.
-- **Complexity**: Highly nested JSON structure with encrypted `.bcmkn` wrappers (Requires external Python decryption tool `tools/decrypt_bcmkn.py` before feeding into this CLI).
+- **Complexity**: Highly nested JSON structure. Uses encrypted `.bcmkn` AES-GCM wrappers which this CLI automatically detects and decrypts natively.
 
 ## ⚙️ Core Translation Mechanics
 

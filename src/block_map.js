@@ -85,6 +85,7 @@ const MOUSE_EVENT_MAP = {
 const BLOCK_MAP = {
   // ===== Events =====
   start_on_click: { opcode: "event_whenflagclicked", map: {} },
+  backdrop_on_change: { opcode: "event_whenbackdropswitchesto", map: { BACKDROP: F("backdrop") }, special: "backdrop_on_change", hat: true },
   on_keydown: { opcode: "event_whenkeypressed", map: { KEY_OPTION: F("key"), KEY_MODE: F("type") } },
   sprite_on_tap: { opcode: "event_whenthisspriteclicked", map: {}, hat: true, dropParams: ["actor", "type"] },
   self_on_tap: { opcode: "event_whenthisspriteclicked", map: {}, hat: true },
@@ -95,7 +96,6 @@ const BLOCK_MAP = {
   self_broadcast: { opcode: "event_broadcast", map: {}, special: "broadcast_send" },
   self_broadcast_and_wait: { opcode: "event_broadcastandwait", map: {}, special: "broadcast_send" },
   on_running_group_activated: { opcode: "event_whenflagclicked", map: {} },
-  backdrop_on_change: { opcode: "event_whenbackdropswitchesto", map: {}, special: "backdrop_on_change", hat: true },
   when: { opcode: "event_whenbroadcastreceived", map: { CONDITION: E("condition") } },
 
   // ===== Control =====
@@ -126,13 +126,15 @@ const BLOCK_MAP = {
   self_set_effect_2: { opcode: "looks_seteffectto", map: { EFFECT: F("scope"), VALUE: E("val") } },
   self_appear: { opcode: "looks_show", map: {} },
   self_disappear: { opcode: "looks_hide", map: {} },
+  self_gradually_show_hide: { opcode: "looks_show", map: {}, special: "gradually_show_hide" },
   self_change_scale_2: { opcode: "looks_setsizeto", map: { SIZE: E("scale") } },
   self_text_effect_text: { opcode: "looks_say", map: { MESSAGE: E("text") } },
-  self_text_effect_color: { opcode: "looks_seteffectto", map: { EFFECT: "color", VALUE: E("color") } },
+  self_text_effect_color: { opcode: "looks_seteffectto", map: {}, special: "text_effect_color" },
   self_next_style: { opcode: "looks_nextcostume", map: {} },
   set_costume_by_id: { opcode: "looks_switchcostumeto", map: {}, special: "costume_by_id" },
   set_costume: { opcode: "looks_switchcostumeto", map: {}, special: "costume_by_id" },
   self_change_scale: { opcode: "looks_changesizeby", map: { CHANGE: E("scale") } },
+  self_text_effect_size: { opcode: "looks_setsizeto", map: { SIZE: E("size") } },
   self_clear_effects: { opcode: "looks_cleargraphiceffects", map: {} },
   set_theatre_layer: { opcode: "looks_gotofrontback", special: "layer" },
   set_scale: { opcode: "looks_setsizeto", map: { SIZE: E("scale") } },
@@ -142,13 +144,14 @@ const BLOCK_MAP = {
   audio_stop: { opcode: "sound_stopallsounds", map: {} },
   stop: { opcode: "control_stop", map: { STOP_OPTION: null }, special: "stop" },
   self_rotate_around: { opcode: "motion_turnright", map: { DEGREES: E("degrees") }, special: "rotate_around" },
+  self_glide_coordinate_y: { opcode: "motion_glidesecstoxy", map: {}, special: "glide_coordinate_y" },
   change_volume_or_rate: { opcode: "sound_setvolumeto", map: { VOLUME: E("volume") } },
 
   // ===== Pen =====
   self_pen_down: { opcode: "pen_penDown", map: {} },
   self_pen_up: { opcode: "pen_penUp", map: {} },
   clear_drawing: { opcode: "pen_clear", map: {} },
-  set_layer_with_pen: { opcode: "pen_setPenColorToColor", map: { COLOR: E("color") } },
+  set_layer_with_pen: { opcode: "pen_setPenColorToColor", map: { COLOR: E("color") }, special: "set_layer_with_pen" },
   stamp: { opcode: "pen_stamp", map: {} },
   image_stamp: { opcode: "pen_stamp", map: {} },
   self_set_pen_color: { opcode: "pen_setPenColorToColor", map: { COLOR: E("color") }, special: "pen_color" },
@@ -157,7 +160,7 @@ const BLOCK_MAP = {
   // ===== Sensing =====
   mouse_down: { opcode: "sensing_mousedown", map: { MOUSE_EVENT_TYPE: F("mouse_event_type") }, special: "mouse_down" },
   mouse_click: { opcode: "sensing_mousedown", map: { MOUSE_EVENT_TYPE: F("mouse_event_type") } },
-  check_key: { opcode: "sensing_keypressed", map: { KEY_OPTION: E("key") } },
+  check_key: { opcode: "sensing_keypressed", map: {}, special: "check_key" },
   bump: { opcode: "sensing_touchingobject", map: {}, special: "bump" },
   bump_into: { opcode: "sensing_touchingobject", map: {}, special: "bump" },
   bump_into_color: { opcode: "sensing_touchingcolor", map: { COLOR: E("color") } },
@@ -194,7 +197,7 @@ const BLOCK_MAP = {
   math_number_property: { opcode: "operator_lt", special: "number_property" },
   math_arc_trig: { opcode: "operator_mathop", map: { NUM: E("A"), OPERATOR: F("type") }, special: "arc_trig" },
   random: { opcode: "operator_random", map: { FROM: E("a"), TO: E("b") } },
-  text_join: { opcode: "operator_join", map: { STRING1: E("TEXT1"), STRING2: E("TEXT2") } },
+  text_join: { opcode: "operator_join", map: { STRING1: E("TEXT1"), STRING2: E("TEXT2") }, special: "text_join" },
   text_split: { opcode: "operator_letter_of", special: "text_split" },
   text_length: { opcode: "operator_length", map: { STRING: E("TEXT") } },
   text_contain: { opcode: "operator_contains", map: { STRING1: E("TEXT1"), STRING2: E("TEXT2") } },
@@ -223,6 +226,7 @@ const BLOCK_MAP = {
   // ===== Procedures =====
   procedures_2_defnoreturn: { opcode: "procedures_definition", special: "procedure_def" },
   procedures_2_callnoreturn: { opcode: "procedures_call", special: "procedure_call" },
+  procedures_2_callreturn: { opcode: "procedures_call", special: "procedure_call_return" },
   procedures_2_return_value: { opcode: "procedures_call", special: "procedure_call_return" },
   procedures_2_parameter: { opcode: "argument_reporter_string_number", special: "procedure_param" },
   procedures_2_actor_param: { opcode: "argument_reporter_string_number", special: "procedure_param" },
@@ -234,6 +238,10 @@ const BLOCK_MAP = {
   get_current_clone_index: { opcode: "sensing_of", special: "clone_index" },
   get_clone_num: { opcode: "sensing_of", special: "clone_count" },
   get_clone_index_property: { opcode: "sensing_of", special: "clone_prop" },
+  restart: { opcode: "control_stop", map: {}, special: "restart" },
+  traverse_number: { opcode: "control_repeat", map: {}, special: "traverse_number", branch: "statements" },
+  traverse_number_param: { opcode: "data_variable", map: {}, special: "traverse_param" },
+  traverse_number_value: { opcode: "data_variable", map: {}, special: "traverse_param" },
 
   // ===== Stage / Screen =====
   switch_to_screen: { opcode: "looks_switchbackdropto", special: "switch_to_screen" },

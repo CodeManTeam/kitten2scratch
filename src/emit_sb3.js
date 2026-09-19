@@ -119,6 +119,9 @@ function emitBlock(block, container, blockId, context) {
         (context.__bcByName && context.__bcByName.get(fv));
       fv = bcInfo ? [bcInfo.name, fv] : [fv, fv];
       if (bcInfo) fv[1] = bcInfo.id;
+    } else if (fieldName === "LIST" && typeof fv === "string") {
+      const listInfo = context.__listLookup && context.__listLookup.get(fv);
+      fv = listInfo ? [listInfo.name, listInfo.id] : [fv, fv];
     }
     sb3Block.fields[fieldName] = Array.isArray(fv) ? fv : [fv, null];
   }
@@ -343,9 +346,13 @@ function emitProject(project) {
 
   const varLookup = new Map();
   for (const v of project.variables) varLookup.set(v.id, { name: v.name });
+  const listLookup = new Map();
+  for (const v of project.variables) {
+    if (v.isList) listLookup.set(v.id, { name: v.name, id: v.id });
+  }
   const bcLookup = new Map();
   for (const b of project.broadcasts) bcLookup.set(b.id, { name: b.name });
-  const ctx = { allVariables: project.variables, allBroadcasts: project.broadcasts, __allTargets: [project.stage, ...project.sprites].filter(Boolean), __varLookup: varLookup, __bcLookup: bcLookup, __bcByName: broadcastByName, __project: project };
+  const ctx = { allVariables: project.variables, allBroadcasts: project.broadcasts, __allTargets: [project.stage, ...project.sprites].filter(Boolean), __varLookup: varLookup, __listLookup: listLookup, __bcLookup: bcLookup, __bcByName: broadcastByName, __project: project };
 
   if (project.stage) {
     const stage = emitTarget(project.stage, { ...ctx, isStage: true });
@@ -388,10 +395,12 @@ function emitProject(project) {
 function emitTarget(target, context) {
   const { isStage } = context;
   const targetVarLookup = new Map(context.__varLookup || []);
+  const targetListLookup = new Map(context.__listLookup || []);
   for (const variable of target.variables || []) {
     targetVarLookup.set(variable.id, { name: variable.name });
+    if (variable.isList) targetListLookup.set(variable.id, { name: variable.name, id: variable.id });
   }
-  const targetContext = { ...context, __varLookup: targetVarLookup };
+  const targetContext = { ...context, __varLookup: targetVarLookup, __listLookup: targetListLookup };
   const sb3Target = {
     isStage, name: isStage ? "Stage" : target.name,
     variables: {}, lists: {}, broadcasts: {},

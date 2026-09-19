@@ -21,8 +21,10 @@
 const {
   makeProject, makeTarget, makeVariable, makeBroadcast,
   makeBlock, makeExpr, makeValue, makeCostume,
+  addSpriteInitialization, addSceneVisibilityHandlers,
 } = require("./ir");
 const { BLOCK_MAP } = require("./block_map");
+const { addSceneBackdrops } = require("./scene_backdrops");
 
 // ---- Shadow XML parser (minimal, no DOM) ----
 
@@ -38,6 +40,67 @@ function parseShadowXml(xml) {
     fields[m[1]] = m[2];
   }
   return { type, fields };
+}
+
+function readDict(value, key) {
+  if (!value || typeof value !== "object") return {};
+  return value[key] && typeof value[key] === "object" ? value[key] : value;
+}
+
+function valueOfField(fields, ...keys) {
+  for (const key of keys) {
+    if (fields && fields[key] !== undefined) return fields[key];
+  }
+  return undefined;
+}
+
+function listId(value) {
+  if (value && typeof value === "object") {
+    return valueOfField(value.fields, "list", "LIST", "variable", "VAR") || valueOfField(value.params, "list", "LIST", "variable", "VAR");
+  }
+  return value;
+}
+
+function makeUnsupported(type, id) {
+  return makeBlock("control_wait", {
+    inputs: { DURATION: makeValue(0, "number") },
+    meta: { kittenType: type, kittenId: id, source: "kittenn", unsupported: true },
+  });
+}
+
+function sceneActivationRoot(root, backdrop, active) {
+  if (active || !root) return root;
+  if (["on_running_group_activated", "start_on_click"].includes(root.type)) {
+    return { ...root, type: "backdrop_on_change", fields: { ...(root.fields || {}), backdrop } };
+  }
+  return root;
+}
+
+function sceneGuardChain(chain, backdrop, active) {
+  if (active || !chain.length) return chain;
+  const first = chain[0];
+  if (!first || first.opcode === "event_whenbackdropswitchesto") return chain;
+  if (!first.opcode.startsWith("event_")) return chain;
+  const body = chain.slice(1);
+  if (!body.length) return chain;
+  first.branches = [[makeBlock("control_if", {
+    inputs: {
+      CONDITION: makeExpr(makeBlock("looks_backdropnumbername", {
+        inputs: { NUMBER_NAME: makeValue(backdrop, "string") },
+      })),
+      SUBSTACK: undefined,
+    },
+  })]];
+  first.branches[0][0].inputs = {
+    CONDITION: makeExpr(makeBlock("operator_equals", {
+      inputs: {
+        OPERAND1: makeExpr(makeBlock("looks_backdropnumbername", { inputs: { NUMBER_NAME: makeValue("name", "string") } })),
+        OPERAND2: makeValue(backdrop, "string"),
+      },
+    })),
+  };
+  first.branches[0][0].branches = [body];
+  return [first];
 }
 
 // ---- Block conversion ----
@@ -75,9 +138,7 @@ function convertNemoBlock(nemoBlock, context) {
 
   const mapping = BLOCK_MAP[type];
   if (!mapping) {
-    return makeBlock("comment", {
-      meta: { kittenType: type, kittenId: nemoBlock.id, source: "kittenn", unsupported: true },
-    });
+    return makeUnsupported(type, nemoBlock.id);
   }
 
   const irBlock = makeBlock(mapping.opcode, {
@@ -122,23 +183,23 @@ function convertNemoBlock(nemoBlock, context) {
     }
   }
 
-  // Handle branches (controls_if, repeat_forever etc.)
-  // KittenN doesn't use child_block — it uses nested `statements` or the next chain
-  // Actually KittenN uses the same structure with `branch` in some versions, but
-  // the reference project has substack as the first `next` under certain blocks.
-  // For controls_if: the branch is typically in `inputs.SUBSTACK`
-  if (type === "controls_if") {
-    if (nemoBlock.inputs && nemoBlock.inputs.SUBSTACK) {
-      irBlock.branches.push(convertNemoChain(nemoBlock.inputs.SUBSTACK, context));
+  // KittenN stores C-block bodies in `statements`, not in `inputs`.
+  const statements = nemoBlock.statements || {};
+  if (type === "controls_if" || type === "controls_if_no_else" || type === "control_if_else") {
+    const conditionKeys = Object.keys(inputs).filter((key) => /^IF\d+$/i.test(key));
+    if (conditionKeys.length && !irBlock.inputs.CONDITION) {
+      irBlock.inputs.CONDITION = makeExpr(convertNemoBlock(inputs[conditionKeys[0]], context));
     }
-    if (nemoBlock.inputs && nemoBlock.inputs.SUBSTACK2) {
-      irBlock.branches.push(convertNemoChain(nemoBlock.inputs.SUBSTACK2, context));
-    }
-  }
-  if (["repeat_forever", "repeat_n_times", "repeat_forever_until", "warp"].includes(type)) {
-    if (nemoBlock.inputs && nemoBlock.inputs.SUBSTACK) {
-      irBlock.branches.push(convertNemoChain(nemoBlock.inputs.SUBSTACK, context));
-    }
+    const body = statements.DO0 || statements.DO || statements.SUBSTACK;
+    const alternate = statements.ELSE || statements.ELSE0 || statements.SUBSTACK2;
+    if (body) irBlock.branches.push(convertNemoChain(body, context));
+    if (alternate) irBlock.branches.push(convertNemoChain(alternate, context));
+  } else if (["repeat_forever", "repeat_n_times", "repeat_forever_until", "warp", "traverse_number"].includes(type)) {
+    const body = statements.DO || statements.DO0 || statements.STACK;
+    if (body) irBlock.branches.push(convertNemoChain(body, context));
+  } else if (type === "procedures_2_defnoreturn") {
+    const body = statements.STACK || statements.DO;
+    if (body) irBlock.branches.push(convertNemoChain(body, context));
   }
 
   // Special handlers (shared logic with Kitten4)
@@ -151,7 +212,9 @@ function convertNemoBlock(nemoBlock, context) {
 
 function findMapKey(map, kittenKey) {
   if (!map) return null;
-  for (const [scratchName, [kind, key]] of Object.entries(map)) {
+  for (const [scratchName, entry] of Object.entries(map)) {
+    if (!Array.isArray(entry)) continue;
+    const [kind, key] = entry;
     if (key === kittenKey) return [scratchName, kind];
   }
   return null;
@@ -162,6 +225,10 @@ function applyNemoSpecial(type, irBlock, nemoBlock, context) {
   const inputs = nemoBlock.inputs || {};
 
   switch (type) {
+    case "backdrop_on_change": {
+      irBlock.fields.BACKDROP = fields.backdrop || fields.BACKDROP || context.sceneBackdrop || "";
+      break;
+    }
     case "math_arithmetic": {
       const op = fields.type || fields.OP || "add";
       const scratchOp = { add: "+", minus: "-", multiply: "*", divide: "/" }[op] || "+";
@@ -176,6 +243,59 @@ function applyNemoSpecial(type, irBlock, nemoBlock, context) {
       if (!irBlock.inputs.B && inputs.B) {
         irBlock.inputs.B = makeExpr(convertNemoBlock(inputs.B, context));
       }
+      break;
+    }
+    case "text_join": {
+      // KittenN names the two join slots ADD0/ADD1 in some exports, while
+      // other versions use TEXT1/TEXT2. Normalize both forms to Scratch's
+      // STRING1/STRING2 inputs so TurboWarp does not drop the operands.
+      const toInput = (value) => {
+        if (value && typeof value === "object" && value.type) {
+          return makeExpr(convertNemoBlock(value, context));
+        }
+        return makeValue(String(value ?? ""), "string");
+      };
+      const left = inputs.ADD0 || inputs.TEXT1 || inputs.STRING1 || inputs.A;
+      const right = inputs.ADD1 || inputs.TEXT2 || inputs.STRING2 || inputs.B;
+      if (left !== undefined) irBlock.inputs.STRING1 = toInput(left);
+      if (right !== undefined) irBlock.inputs.STRING2 = toInput(right);
+      for (const key of ["ADD0", "ADD1", "TEXT1", "TEXT2", "A", "B"]) {
+        if (key !== "STRING1" && key !== "STRING2") delete irBlock.inputs[key];
+      }
+      break;
+    }
+    case "check_key": {
+      irBlock.inputs.KEY_OPTION = makeValue(String(fields.key ?? fields.KEY_OPTION ?? ""), "string");
+      delete irBlock.fields.KEY_OPTION;
+      delete irBlock.fields.TYPE;
+      break;
+    }
+    case "self_text_effect_color": {
+      irBlock.fields.EFFECT = "color";
+      const color = inputs.color || fields.color || fields.COLOR;
+      if (color && typeof color === "object" && color.type) {
+        irBlock.inputs.VALUE = makeExpr(convertNemoBlock(color, context));
+      } else {
+        irBlock.inputs.VALUE = makeValue(String(color || "#ffffff"), "string");
+      }
+      delete irBlock.fields.COLOR;
+      delete irBlock.fields.VALUE;
+      break;
+    }
+    case "bump_into":
+    case "bump": {
+      const sprite = fields.sprite1 || fields.SPRITE1 || fields.sprite || fields.SPRITE || "--mouse";
+      irBlock.inputs.TOUCHINGOBJECTMENU = makeValue(
+        sprite === "--mouse" ? "_mouse_" : sprite === "--edge" ? "_edge_" : String(sprite),
+        "string",
+      );
+      delete irBlock.fields.SPRITE;
+      delete irBlock.fields.SPRITE1;
+      break;
+    }
+    case "mirror": {
+      irBlock.inputs.DEGREES = makeValue(180, "number");
+      delete irBlock.fields.SPRITE;
       break;
     }
     case "logic_compare": {
@@ -208,12 +328,80 @@ function applyNemoSpecial(type, irBlock, nemoBlock, context) {
       irBlock.fields.VARIABLE = fields.variable || fields.VAR || "<unknown>";
       break;
     }
+    case "variable_get":
+    case "variable_set":
+    case "variable_change": {
+      irBlock.fields.VARIABLE = fields.variable || fields.VAR || "<unknown>";
+      break;
+    }
     case "variables_set":
     case "change_variables": {
       irBlock.fields.VARIABLE = fields.variable || "<unknown>";
       if (inputs.value && !irBlock.inputs.VALUE) {
         irBlock.inputs.VALUE = makeExpr(convertNemoBlock(inputs.value, context));
       }
+      break;
+    }
+    case "list_get":
+    case "list_item":
+    case "pure_list_get": {
+      irBlock.fields.LIST = listId(inputs.list || fields.list || fields.LIST);
+      const index = inputs.list_index || inputs.INDEX || inputs.index;
+      if (index) irBlock.inputs.INDEX = makeExpr(convertNemoBlock(index, context));
+      delete irBlock.inputs.LIST;
+      break;
+    }
+    case "self_listen":
+    case "broadcast_input": {
+      const message = inputs.message || inputs.MESSAGE || fields.message || fields.MESSAGE;
+      const messageFields = message && message.fields;
+      irBlock.fields.BROADCAST_OPTION = valueOfField(messageFields, "message", "MESSAGE") || message || "";
+      delete irBlock.inputs.MESSAGE;
+      break;
+    }
+    case "self_broadcast":
+    case "self_broadcast_and_wait": {
+      const message = inputs.message || inputs.MESSAGE || fields.message || fields.MESSAGE;
+      const messageFields = message && message.fields;
+      const name = valueOfField(messageFields, "message", "MESSAGE") || message || "";
+      irBlock.inputs.BROADCAST_INPUT = makeValue(String(name), "string");
+      delete irBlock.inputs.MESSAGE;
+      break;
+    }
+    case "variable_change": {
+      irBlock.fields.VARIABLE = fields.variable || fields.VAR || "<unknown>";
+      irBlock.inputs.VALUE ||= makeValue(1, "number");
+      break;
+    }
+    case "restart": {
+      irBlock.fields.STOP_OPTION = "this script";
+      break;
+    }
+    case "gradually_show_hide": {
+      irBlock.opcode = String(fields.show_hide || "show") === "hide" ? "looks_hide" : "looks_show";
+      break;
+    }
+    case "glide_coordinate_y": {
+      const time = inputs.time ? convertNemoBlock(inputs.time, context) : makeBlock("math_number");
+      const value = inputs.value ? convertNemoBlock(inputs.value, context) : makeBlock("math_number");
+      irBlock.inputs.SECS = makeExpr(time);
+      irBlock.inputs.X = makeExpr(makeBlock("motion_xposition"));
+      irBlock.inputs.Y = makeExpr(value);
+      break;
+    }
+    case "traverse_number": {
+      const from = inputs.from ? convertNemoBlock(inputs.from, context) : makeBlock("math_number");
+      const to = inputs.to ? convertNemoBlock(inputs.to, context) : makeBlock("math_number");
+      irBlock.opcode = "control_repeat";
+      irBlock.inputs.TIMES = makeExpr(makeBlock("operator_add", {
+        inputs: { NUM1: makeExpr(to), NUM2: makeExpr(makeBlock("operator_subtract", { inputs: { NUM1: makeExpr(from), NUM2: makeValue(1, "number") } })) },
+      }));
+      break;
+    }
+    case "traverse_number_param":
+    case "traverse_number_value": {
+      const name = fields.TEXT || fields.text || fields.name || fields.variable || "i";
+      irBlock.fields.VARIABLE = String(name);
       break;
     }
     case "procedures_2_defnoreturn": {
@@ -227,7 +415,14 @@ function applyNemoSpecial(type, irBlock, nemoBlock, context) {
       break;
     }
     case "procedures_2_callnoreturn": {
-      irBlock.mutation = { procCode: fields.procCode || fields.NAME || "function" };
+      const proccode = fields.procCode || fields.PROCCODE || fields.NAME || "function";
+      irBlock.mutation = { tagName: "mutation", proccode, procCode: proccode, argumentids: JSON.stringify([]), warp: "false" };
+      break;
+    }
+    case "procedures_2_callreturn":
+    case "procedures_2_return_value": {
+      const proccode = fields.procCode || fields.PROCCODE || fields.NAME || "function";
+      irBlock.mutation = { tagName: "mutation", proccode, procCode: proccode, argumentids: JSON.stringify([]), warp: "false" };
       break;
     }
     case "procedures_2_parameter":
@@ -245,91 +440,150 @@ function parseKittenN(decryptedJson) {
   const project = makeProject(decryptedJson.projectName || "KittenN Project", {
     sourceFormat: "kittenn",
     sourceFile: decryptedJson.__sourceFile || null,
+    framerate: Number(decryptedJson.framerate || decryptedJson.fps) || 60,
   });
 
-  // Variables
-  const variables = decryptedJson.variables || {};
-  if (Array.isArray(variables)) {
-    for (const v of variables) {
-      project.variables.push(makeVariable(v.id || v.name, v.name || v.id, v.value || "", v.isCloud || false, Array.isArray(v.value), true));
-    }
-  } else if (typeof variables === "object") {
-    for (const [id, v] of Object.entries(variables)) {
-      project.variables.push(makeVariable(id, v.name || id, v.value || "", v.isCloud || false, Array.isArray(v.value), true));
-    }
+  const variablesData = readDict(decryptedJson.variables, "variablesDict");
+  const broadcastsData = readDict(decryptedJson.broadcasts, "broadcastsDict");
+  const stylesData = readDict(decryptedJson.styles, "stylesDict");
+  const scenesData = decryptedJson.scenes || {};
+  const scenesDict = readDict(scenesData, "scenesDict");
+  const actorsData = readDict(decryptedJson.actors, "actorsDict");
+  const sceneIds = Array.isArray(scenesData.sortList) ? scenesData.sortList : Object.keys(scenesDict);
+  const currentSceneId = scenesData.currentSceneId || sceneIds[0];
+
+  const variableNameById = new Map();
+  for (const [id, value] of Object.entries(variablesData)) {
+    const info = value && typeof value === "object" ? value : { value };
+    const name = info.name || id;
+    variableNameById.set(String(id), name);
+    project.variables.push(makeVariable(
+      id,
+      name,
+      info.value !== undefined ? info.value : "",
+      Boolean(info.isCloud || info.cloud),
+      Array.isArray(info.value) || info.type === "list",
+      info.isGlobal !== false,
+    ));
   }
 
-  // Broadcasts
-  let broadcasts = decryptedJson.broadcasts || {};
-  if (broadcasts.broadcastsDict) broadcasts = broadcasts.broadcastsDict;
-  if (Array.isArray(broadcasts)) {
-    for (const b of broadcasts) {
-      project.broadcasts.push(makeBroadcast(b.id || b.name, b.name || b.id));
-    }
-  } else if (typeof broadcasts === "object") {
-    for (const [id, value] of Object.entries(broadcasts)) {
-      if (id === "toJSON") continue;
-      const names = Array.isArray(value) ? value : [value];
-      for (const name of names) {
-        if (typeof name === "string" && name) {
-          project.broadcasts.push(makeBroadcast(id, name));
-        }
+  const broadcastNameById = new Map();
+  for (const [id, value] of Object.entries(broadcastsData)) {
+    const names = Array.isArray(value) ? value : [value];
+    for (const name of names) {
+      if (typeof name !== "string" || !name || id === "toJSON") continue;
+      broadcastNameById.set(String(id), name);
+      if (!project.broadcasts.some((broadcast) => broadcast.id === id && broadcast.name === name)) {
+        project.broadcasts.push(makeBroadcast(id, name));
       }
     }
   }
 
-  // Build stage from first scene
-  const scenesData = decryptedJson.scenes || {};
-  const scenesDict = scenesData.scenesDict || {};
-  const currentSceneId = scenesData.currentSceneId;
-  const sceneIds = scenesData.sortList || Object.keys(scenesDict);
+  function makeNemoCostume(styleId, fallbackName) {
+    const style = styleId && styleId.url ? styleId : stylesData[styleId];
+    if (!style) return null;
+    const url = style.url || style.cdn_url || "";
+    const format = /\.png(?:[?#]|$)/i.test(url) ? "png" : /\.(?:jpg|jpeg)(?:[?#]|$)/i.test(url) ? "jpg" : "svg";
+    const center = style.centerPoint || style.rotate_center || style.pivot || { x: 0, y: 0 };
+    return {
+      name: style.name || fallbackName || styleId,
+      sourceFile: url || null,
+      dataFormat: format,
+      rotationCenterX: Number(center.x || 0),
+      rotationCenterY: Number(center.y || 0),
+      bitmapResolution: 1,
+      md5ext: null,
+    };
+  }
 
-  // First scene becomes the stage
-  const stageSceneId = currentSceneId || sceneIds[0];
-  const stageScene = scenesDict[stageSceneId];
-  const stage = makeTarget(stageScene ? (stageScene.name || "Stage") : "Stage", true);
+  const stageScene = scenesDict[currentSceneId];
+  const stage = makeTarget("Stage", true);
+  stage.name = stageScene?.name || "Stage";
+  project.meta.stageWidth = Number(decryptedJson.stageSize?.width) || 480;
+  project.meta.stageHeight = Number(decryptedJson.stageSize?.height) || 360;
+  project.meta.scaleX = 1;
+  project.meta.scaleY = 1;
+  const sceneBackdropData = addSceneBackdrops(stage, {
+    scenes: Object.fromEntries(Object.entries(scenesDict).map(([id, scene]) => [id, {
+      ...scene,
+      current_style_id: scene.currentStyleId,
+      styles: scene.styles,
+    }])),
+    sceneIds,
+    currentSceneId,
+    styles: stylesData,
+    makeCostume: (style, styleId) => makeNemoCostume(style, styleId),
+  });
   project.stage = stage;
 
-  // Remaining scenes become hidden sprites (TurboWarp pattern for multi-scene)
-  for (const sceneId of sceneIds.slice(1)) {
-    const scene = scenesDict[sceneId];
-    if (!scene) continue;
-    const sprite = makeTarget(`[Scene] ${scene.name || sceneId}`, false);
-    sprite.visible = false;
-    project.sprites.push(sprite);
-    attachNemoScripts(scene, sprite, context);
+  const actorSceneById = new Map();
+  for (const [sceneId, scene] of Object.entries(scenesDict)) {
+    for (const actorId of scene.actorIds || []) actorSceneById.set(String(actorId), sceneId);
   }
-
-  // Actors -> sprites
-  const actorsData = decryptedJson.actors || {};
-  const actorsDict = actorsData.actorsDict || {};
   let layerOrder = 1;
-  for (const [actorId, actor] of Object.entries(actorsDict)) {
+  const usedNames = new Set();
+  for (const [actorId, actor] of Object.entries(actorsData)) {
     const sprite = makeTarget(actor.name || actorId, false);
     sprite.__actorId = actorId;
-    sprite.x = actor.position ? (actor.position.x || 0) : 0;
-    sprite.y = actor.position ? -(actor.position.y || 0) : 0; // Nemo Y-axis is inverted
-    sprite.size = actor.scale || 100;
-    sprite.visible = actor.visible !== false;
+    while (usedNames.has(sprite.name)) sprite.name = `${sprite.name} (2)`;
+    usedNames.add(sprite.name);
+    sprite.__sceneId = actorSceneById.get(String(actorId)) || actor.sceneId || actor.scene || currentSceneId;
+    sprite.__sceneVisible = actor.visible !== false;
+    sprite.x = Number(actor.position?.x) || 0;
+    sprite.y = Number(actor.position?.y) || 0;
+    sprite.size = Number(actor.scale) || 100;
+    sprite.direction = 90 - Number(actor.rotation || 0) * 180 / Math.PI;
+    sprite.visible = sprite.__sceneVisible && sprite.__sceneId === currentSceneId;
     sprite.layerOrder = layerOrder++;
+    for (const styleId of actor.styles || []) {
+      const costume = makeNemoCostume(styleId, styleId);
+      if (costume) sprite.costumes.push(costume);
+    }
+    sprite.currentCostume = Math.max(0, (actor.styles || []).indexOf(actor.currentStyleId));
     project.sprites.push(sprite);
-    attachNemoScripts(actor, sprite, { project, target: sprite });
+    attachNemoScripts(actor, sprite, {
+      project, target: sprite, variableNameById, broadcastNameById,
+      sceneBackdrop: sceneBackdropData.sceneBackdropById.get(String(sprite.__sceneId)),
+      activeScene: sprite.__sceneId === currentSceneId,
+    });
+    addSpriteInitialization(sprite);
+    addSceneVisibilityHandlers(
+      sprite,
+      sceneBackdropData.sceneBackdropById.get(String(sprite.__sceneId)),
+      sceneBackdropData.sceneBackdropNames,
+      sprite.__sceneVisible,
+    );
   }
 
-  // Stage scripts
+  // Stage scripts belong to the scene entity, but all scene backdrops live on
+  // the one Scratch stage. Inactive scene roots wait for their backdrop.
   if (stageScene) {
-    attachNemoScripts(stageScene, stage, { project, target: stage });
+    attachNemoScripts(stageScene, stage, {
+      project, target: stage, variableNameById, broadcastNameById,
+      sceneBackdrop: sceneBackdropData.sceneBackdropById.get(String(currentSceneId)),
+      activeScene: true,
+    });
+  }
+
+  for (const sceneId of sceneIds) {
+    if (sceneId === currentSceneId) continue;
+    const scene = scenesDict[sceneId];
+    if (!scene) continue;
+    attachNemoScripts(scene, stage, {
+      project, target: stage, variableNameById, broadcastNameById,
+      sceneBackdrop: sceneBackdropData.sceneBackdropById.get(String(sceneId)),
+      activeScene: false,
+    });
   }
 
   return project;
-
-  function context() { return { project, target: null }; }
 }
 
 function attachNemoScripts(entity, target, context) {
   const blockList = entity.nekoBlockJsonList || [];
   for (const rootBlock of blockList) {
-    const chain = convertNemoChain(rootBlock, context);
+    const root = sceneActivationRoot(rootBlock, context.sceneBackdrop, context.activeScene !== false);
+    const chain = convertNemoChain(root, context);
     if (chain.length > 0) target.blocks.push(chain);
   }
 }
