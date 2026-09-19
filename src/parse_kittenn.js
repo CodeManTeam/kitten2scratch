@@ -83,23 +83,18 @@ function sceneGuardChain(chain, backdrop, active) {
   if (!first.opcode.startsWith("event_")) return chain;
   const body = chain.slice(1);
   if (!body.length) return chain;
-  first.branches = [[makeBlock("control_if", {
+  const guard = makeBlock("control_if", {
     inputs: {
-      CONDITION: makeExpr(makeBlock("looks_backdropnumbername", {
-        inputs: { NUMBER_NAME: makeValue(backdrop, "string") },
+      CONDITION: makeExpr(makeBlock("operator_equals", {
+        inputs: {
+          OPERAND1: makeExpr(makeBlock("looks_backdropnumbername", { inputs: { NUMBER_NAME: makeValue("name", "string") } })),
+          OPERAND2: makeValue(backdrop, "string"),
+        },
       })),
-      SUBSTACK: undefined,
     },
-  })]];
-  first.branches[0][0].inputs = {
-    CONDITION: makeExpr(makeBlock("operator_equals", {
-      inputs: {
-        OPERAND1: makeExpr(makeBlock("looks_backdropnumbername", { inputs: { NUMBER_NAME: makeValue("name", "string") } })),
-        OPERAND2: makeValue(backdrop, "string"),
-      },
-    })),
-  };
-  first.branches[0][0].branches = [body];
+    branches: [body],
+  });
+  first.branches = [...(first.branches || []), [guard]];
   return [first];
 }
 
@@ -588,4 +583,4 @@ function attachNemoScripts(entity, target, context) {
   }
 }
 
-module.exports = { parseKittenN, convertNemoChain, convertNemoBlock, parseShadowXml };
+module.exports = { parseKittenN, convertNemoChain, convertNemoBlock, parseShadowXml, sceneGuardChain };

@@ -45,7 +45,7 @@ function decryptBcmkn(encryptedText) {
   if (stripped.charCodeAt(0) === 0xFEFF) stripped = stripped.slice(1).trim();
   if (stripped.startsWith("{") || stripped.startsWith("[")) return stripped;
 
-  const b64_text = stripped.split("").reverse().join("");
+  const b64_text = Array.from(stripped).reverse().join("");
   const raw = Buffer.from(b64_text, "base64");
   if (raw.length <= 28) throw new Error("input is too short to be a valid AES-GCM bcmkn payload");
 
@@ -165,4 +165,8 @@ async function main() {
   console.log(`Output: ${outputPath} (${(zipBuffer.length / 1024).toFixed(1)} KB)`);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+if (require.main === module) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
+
+module.exports = { decryptBcmkn, detectFormat };
