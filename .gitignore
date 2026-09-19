@@ -23,8 +23,10 @@ Thumbs.db
 
 dist/
 build/
+out/
 .cache/
 coverage/
 *.tmp
 *.temp
-test_kittenn.sb3
+*.sb3
+.trae/rules/git-commit-message.md

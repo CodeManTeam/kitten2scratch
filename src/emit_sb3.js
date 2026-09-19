@@ -115,10 +115,49 @@ function emitBlock(block, container, blockId, context) {
       const varInfo = context.__varLookup && context.__varLookup.get(fv);
       fv = varInfo ? [varInfo.name, fv] : [fv, fv];
     } else if (fieldName === "BROADCAST_OPTION" && typeof fv === "string") {
-      const bcInfo = context.__bcLookup && context.__bcLookup.get(fv);
+      const bcInfo = (context.__bcLookup && context.__bcLookup.get(fv)) ||
+        (context.__bcByName && context.__bcByName.get(fv));
       fv = bcInfo ? [bcInfo.name, fv] : [fv, fv];
+      if (bcInfo) fv[1] = bcInfo.id;
     }
-    sb3Block.fields[fieldName] = [fv];
+    sb3Block.fields[fieldName] = Array.isArray(fv) ? fv : [fv, null];
+  }
+
+  // TurboWarp assumes event hats always have their matching selector field.
+  // K3 workspaces can contain an empty broadcast listener while the user is
+  // still editing it; preserve it as an empty, valid Scratch hat.
+  if (block.opcode === "event_whenbroadcastreceived" && !sb3Block.fields.BROADCAST_OPTION) {
+    sb3Block.fields.BROADCAST_OPTION = ["", null];
+  }
+  if (block.opcode === "event_broadcast" || block.opcode === "event_broadcastandwait") {
+    if (!sb3Block.inputs.BROADCAST_INPUT && sb3Block.inputs.MESSAGE) {
+      sb3Block.inputs.BROADCAST_INPUT = sb3Block.inputs.MESSAGE;
+      delete sb3Block.inputs.MESSAGE;
+    }
+    if (!sb3Block.inputs.BROADCAST_INPUT) {
+      const shadowId = nextBlockId();
+      container[shadowId] = {
+        opcode: "text", next: null, parent: blockId,
+        inputs: {}, fields: { TEXT: ["", null] }, shadow: true, topLevel: false,
+      };
+      sb3Block.inputs.BROADCAST_INPUT = [1, shadowId];
+    }
+  }
+  if (block.__menuShadow && sb3Block.inputs[block.__menuShadow] && sb3Block.inputs[block.__menuShadow][0] === 1) {
+    const val = container[Object.entries(sb3Block.inputs).find(([k]) => k === block.__menuShadow)];
+    // find the shadow block id
+    const sid = sb3Block.inputs[block.__menuShadow][1];
+    const shadow = container[sid];
+    if (shadow && shadow.fields.TEXT !== undefined) {
+      const txt = shadow.fields.TEXT[0];
+      const menuId = nextBlockId();
+      container[menuId] = {
+        opcode: "sensing_touchingobjectmenu", next: null, parent: blockId,
+        inputs: {}, fields: { TOUCHINGOBJECTMENU: [txt, null] },
+        shadow: true, topLevel: false,
+      };
+      sb3Block.inputs[block.__menuShadow] = [1, menuId];
+    }
   }
 
   const branchNames = ["SUBSTACK", "SUBSTACK2"];
@@ -171,11 +210,49 @@ function emitProcedureDef(container, procDef, context, x, y) {
   return defId;
 }
 
+function ensureBroadcasts(project) {
+  const byName = new Map();
+  for (const broadcast of project.broadcasts || []) {
+    if (broadcast && broadcast.name !== undefined) byName.set(String(broadcast.name), broadcast);
+  }
+  const names = [];
+  const { walkChain } = require("./ir");
+  for (const target of [project.stage, ...project.sprites].filter(Boolean)) {
+    for (const chain of target.blocks || []) {
+      walkChain(chain, (block) => {
+        if (block.opcode === "event_whenbroadcastreceived") {
+          const name = block.fields && block.fields.BROADCAST_OPTION;
+          if (typeof name === "string" && name) names.push(name);
+        }
+        if (block.opcode === "event_broadcast" || block.opcode === "event_broadcastandwait") {
+          const input = block.inputs && block.inputs.BROADCAST_INPUT;
+          if (input && input.type === "value" && input.value !== undefined && String(input.value)) {
+            names.push(String(input.value));
+          }
+        }
+      });
+    }
+  }
+  for (const name of names) {
+    if (byName.has(name)) continue;
+    const id = `__k2s_broadcast_${project.broadcasts.length + 1}`;
+    const broadcast = { id, name };
+    project.broadcasts.push(broadcast);
+    byName.set(name, broadcast);
+  }
+  return byName;
+}
+
 function emitProject(project) {
   resetIds();
+  const broadcastByName = ensureBroadcasts(project);
   const sb3Project = {
     targets: [], monitors: [], extensions: [],
     meta: { semver: "3.0.0", vm: "0.2.0", agent: "kitten2scratch" },
+    // Kitten's PerTick scheduler runs at 60 ticks per second. TurboWarp's
+    // default is 30, which doubles movement/rotation speed when copied as a
+    // forever loop, so preserve the source tick rate in project.json.
+    framerate: Number(project.meta.framerate) || 60,
   };
   // Compute md5ext for each costume/sound from sourceFile
   const crypto = require("crypto");
@@ -268,9 +345,27 @@ function emitProject(project) {
   for (const v of project.variables) varLookup.set(v.id, { name: v.name });
   const bcLookup = new Map();
   for (const b of project.broadcasts) bcLookup.set(b.id, { name: b.name });
-  const ctx = { allVariables: project.variables, allBroadcasts: project.broadcasts, __allTargets: [project.stage, ...project.sprites].filter(Boolean), __varLookup: varLookup, __bcLookup: bcLookup, __project: project };
+  const ctx = { allVariables: project.variables, allBroadcasts: project.broadcasts, __allTargets: [project.stage, ...project.sprites].filter(Boolean), __varLookup: varLookup, __bcLookup: bcLookup, __bcByName: broadcastByName, __project: project };
 
-  if (project.stage) sb3Project.targets.push(emitTarget(project.stage, { ...ctx, isStage: true }));
+  if (project.stage) {
+    const stage = emitTarget(project.stage, { ...ctx, isStage: true });
+    const framerate = Number(project.meta.framerate) || 60;
+    const width = Number(project.meta.stageWidth) || 480;
+    const height = Number(project.meta.stageHeight) || 360;
+    // TurboWarp loads project runtime settings from a specially marked stage
+    // comment, not the root project JSON. This preserves Kitten's 60Hz
+    // PerTick loops and its native canvas dimensions.
+    stage.comments.__k2s_turbo_config = {
+      blockId: null,
+      x: 24,
+      y: 24,
+      width: 350,
+      height: 170,
+      minimized: true,
+      text: `Configuration for https://turbowarp.org/\n${JSON.stringify({ framerate, width, height })} // _twconfig_`,
+    };
+    sb3Project.targets.push(stage);
+  }
   for (const sprite of project.sprites) {
     sb3Project.targets.push(emitTarget(sprite, { ...ctx, isStage: false }));
   }
@@ -292,11 +387,16 @@ function emitProject(project) {
 
 function emitTarget(target, context) {
   const { isStage } = context;
+  const targetVarLookup = new Map(context.__varLookup || []);
+  for (const variable of target.variables || []) {
+    targetVarLookup.set(variable.id, { name: variable.name });
+  }
+  const targetContext = { ...context, __varLookup: targetVarLookup };
   const sb3Target = {
     isStage, name: isStage ? "Stage" : target.name,
     variables: {}, lists: {}, broadcasts: {},
     blocks: {}, comments: {},
-    currentCostume: 0, costumes: [], sounds: [],
+    currentCostume: target.currentCostume || 0, costumes: [], sounds: [],
     volume: 100, layerOrder: target.layerOrder || 0,
     tempo: 60, videoTransparency: 50, videoState: "on",
     textToSpeechLanguage: null,
@@ -339,6 +439,7 @@ function emitTarget(target, context) {
   if (isStage && context.allVariables) {
     const localIds = new Set((target.variables || []).map(v => v.id));
     for (const v of context.allVariables) {
+      if (v.isGlobal === false) continue;
       if (localIds.has(v.id)) continue;
       if (v.isList) { sb3Target.lists[v.id] = [v.name, Array.isArray(v.value) ? v.value : []]; }
       else { sb3Target.variables[v.id] = [v.name, v.value || 0, ...(v.isCloud ? [true] : [])]; }
@@ -391,13 +492,13 @@ function emitTarget(target, context) {
   const procSource = procDefs || { values: () => [] };
   if (procDefs) {
     for (const procDef of procDefs.values()) {
-      emitProcedureDef(sb3Target.blocks, procDef, context, 48 + (scriptIndex % 8) * 220, 48 + scriptIndex * 100);
+      emitProcedureDef(sb3Target.blocks, procDef, targetContext, 48 + (scriptIndex % 8) * 220, 48 + scriptIndex * 100);
       scriptIndex++;
     }
   }
   for (const chain of target.blocks) {
     if (!chain || chain.length === 0) continue;
-    const chainIds = emitChain(chain, sb3Target.blocks, null, context);
+    const chainIds = emitChain(chain, sb3Target.blocks, null, targetContext);
     if (chainIds.length > 0) {
       sb3Target.blocks[chainIds[0]].topLevel = true;
       sb3Target.blocks[chainIds[0]].x = 48 + (scriptIndex % 8) * 220;
@@ -432,4 +533,4 @@ async function packageSb3(sb3Project, assetFetcher) {
   return zip.generateAsync({ type: "nodebuffer" });
 }
 
-module.exports = { emitProject, packageSb3, emitChain, emitBlock };
+module.exports = { emitProject, packageSb3, emitChain, emitBlock, emitTarget };

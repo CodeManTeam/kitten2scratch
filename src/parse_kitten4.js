@@ -9,9 +9,11 @@
 
 const {
   makeProject, makeTarget, makeVariable, makeBroadcast,
-  makeBlock, makeExpr, makeValue,
+  makeBlock, makeExpr, makeValue, addSpriteInitialization,
+  addSceneVisibilityHandlers,
 } = require("./ir");
 const { BLOCK_MAP } = require("./block_map");
+const { addSceneBackdrops } = require("./scene_backdrops");
 
 /**
  * Convert a Kitten4 compile_result block chain to a flat IR chain.
@@ -20,11 +22,15 @@ const { BLOCK_MAP } = require("./block_map");
 function convertChain(kittenBlock, context) {
   const chain = [];
   let current = kittenBlock;
+  const seen = new Set();
   let guard = 0;
   while (current && typeof current === "object" && guard < 10000) {
     guard++;
+    if (seen.has(current.id)) break;
+    if (current.id) seen.add(current.id);
     const block = convertBlock(current, context);
-    if (block) chain.push(block);
+    if (block?.__replacementChain) chain.push(...block.__replacementChain);
+    else if (block) chain.push(block);
     current = current.next_block;
   }
   return chain;
@@ -38,12 +44,12 @@ function convertBlock(kittenBlock, context) {
     // Unknown block: emit a comment placeholder
     return makeBlock("motion_setx", {
       inputs: { X: makeValue(0, "number") },
-      meta: { kittenType: type, kittenId: kittenBlock.id, source: "kitten4", unsupported: true },
+    meta: { kittenType: type, kittenId: kittenBlock.id, source: context.source || "kitten4", unsupported: true },
     });
   }
 
   const irBlock = makeBlock(mapping.opcode, {
-    meta: { kittenType: type, kittenId: kittenBlock.id, source: "kitten4" },
+    meta: { kittenType: type, kittenId: kittenBlock.id, source: context.source || "kitten4" },
   });
 
   // Handle conditions for `when` (conditional hat blocks)
@@ -145,6 +151,18 @@ function isBlockRef(value) {
   return value && typeof value === "object" && value.type !== undefined;
 }
 
+function broadcastName(value) {
+  if (isBlockRef(value)) {
+    const params = value.params || {};
+    return broadcastName(
+      params.MESSAGE ?? params.message ?? params.msg ?? params.broadcast ??
+      params.TEXT ?? params.text ?? value.value,
+    );
+  }
+  if (value && typeof value === "object" && value.value !== undefined) return broadcastName(value.value);
+  return value;
+}
+
 function walkKittenBlocks(block, fn) {
   if (!block || typeof block !== "object") return;
   if (Array.isArray(block)) {
@@ -169,10 +187,153 @@ function resolveParam(value, context) {
   return undefined;
 }
 
+function numericInput(value, context) {
+  if (isBlockRef(value)) return makeExpr(convertBlock(value, context));
+  const number = Number(value);
+  return makeValue(Number.isFinite(number) ? number : 0, "number");
+}
+
+function expr(opcode, inputs = {}, fields = {}) {
+  return makeExpr(makeBlock(opcode, { inputs, fields }));
+}
+
+function valueExpr(value) {
+  return value && (value.type === "expr" || value.type === "value")
+    ? value : makeValue(value, "number");
+}
+
+function binary(opcode, left, right) {
+  return expr(opcode, { NUM1: valueExpr(left), NUM2: valueExpr(right) });
+}
+
+function negate(input) {
+  return binary("operator_subtract", makeValue(0, "number"), input);
+}
+
+function scratchRotationStyle(rotationType) {
+  return ({ 0: "all around", 1: "left-right", 2: "don't rotate" })[Number(rotationType)] || "all around";
+}
+
+function uniqueSceneSpriteName(value, used) {
+  const base = String(value || "Sprite");
+  let name = base;
+  let suffix = 2;
+  while (used.has(name)) name = `${base} (${suffix++})`;
+  used.add(name);
+  return name;
+}
+
+function sceneBackdropInput(value, context) {
+  if (isBlockRef(value)) return makeExpr(convertBlock(value, context));
+  const raw = String(value ?? "");
+  const backdrop = context.__sceneBackdropById?.get(raw) || context.__sceneBackdropByName?.get(raw) || raw;
+  return makeValue(backdrop, "string");
+}
+
+function sceneActivationRoot(rootBlock, sceneId, active) {
+  if (active || !rootBlock || rootBlock.type !== "start_on_click") return rootBlock;
+  return { ...rootBlock, type: "backdrop_on_change", params: { ...(rootBlock.params || {}), scene: sceneId } };
+}
+
+function orbitVariable(context, suffix) {
+  const target = context.target;
+  if (!target) return null;
+  context.__orbitVars ||= {};
+  const key = `${target.name}:${suffix}`;
+  if (!context.__orbitVars[key]) {
+    const id = `__k2s_orbit_${target.name}_${suffix}`;
+    const name = `__k2s_orbit_${suffix}`;
+    const existing = target.variables.find((variable) => variable.id === id);
+    if (!existing) target.variables.push(makeVariable(id, name, 0, false, false, false));
+    context.__orbitVars[key] = { id, name };
+  }
+  return context.__orbitVars[key];
+}
+
+function variableGet(variable) {
+  return expr("data_variable", {}, { VARIABLE: variable.id });
+}
+
+function targetReporter(context, targetName, property) {
+  const currentName = context.target?.name;
+  if (!targetName || targetName === "__self" || targetName === currentName) {
+    return expr(property === "x" ? "motion_xposition" : "motion_yposition");
+  }
+  return expr("sensing_of", { OBJECT: makeValue(targetName, "string") }, {
+    PROPERTY: property === "x" ? "x position" : "y position",
+  });
+}
+
+function buildOrbitChain(kittenBlock, context, angleInput) {
+  const params = kittenBlock.params || {};
+  const targetRaw = params.sprite ?? params.target ?? params.actor ?? "__self";
+  const targetName = context.__actorNameById?.get(String(targetRaw)) || String(targetRaw);
+  const xVar = orbitVariable(context, "x");
+  const yVar = orbitVariable(context, "y");
+  if (!xVar || !yVar) return null;
+
+  const centerX = targetReporter(context, targetName, "x");
+  const centerY = targetReporter(context, targetName, "y");
+  const savedX = variableGet(xVar);
+  const savedY = variableGet(yVar);
+  const dx = binary("operator_subtract", savedX, centerX);
+  const dy = binary("operator_subtract", savedY, centerY);
+  const cos = expr("operator_mathop", { NUM: angleInput }, { OPERATOR: "cos" });
+  const sin = expr("operator_mathop", { NUM: angleInput }, { OPERATOR: "sin" });
+  const rotatedX = binary("operator_add", centerX, binary(
+    "operator_subtract",
+    binary("operator_multiply", dx, cos),
+    binary("operator_multiply", dy, sin),
+  ));
+  const rotatedY = binary("operator_add", centerY, binary(
+    "operator_add",
+    binary("operator_multiply", dx, sin),
+    binary("operator_multiply", dy, cos),
+  ));
+  const setVar = (variable, input) => makeBlock("data_setvariableto", {
+    fields: { VARIABLE: variable.id },
+    inputs: { VALUE: input },
+    meta: { kittenType: "self_rotate_around", source: context.source || "kitten4" },
+  });
+  const setX = makeBlock("motion_setx", {
+    inputs: { X: rotatedX },
+    meta: { kittenType: "self_rotate_around", source: context.source || "kitten4" },
+  });
+  const setY = makeBlock("motion_sety", {
+    inputs: { Y: rotatedY },
+    meta: { kittenType: "self_rotate_around", source: context.source || "kitten4" },
+  });
+  const turn = makeBlock("motion_turnright", {
+    inputs: { DEGREES: angleInput },
+    meta: { kittenType: "self_rotate_around", source: context.source || "kitten4" },
+  });
+  return [
+    setVar(xVar, expr("motion_xposition")),
+    setVar(yVar, expr("motion_yposition")),
+    setX,
+    setY,
+    turn,
+  ];
+}
+
 // ---- Special block handlers ----
 
 function applySpecial(type, irBlock, kittenBlock, context) {
   const params = kittenBlock.params || {};
+  const source = context.source || "kitten4";
+  const k3Scale = (input) => {
+    if (source !== "kitten3" || !input) return input;
+    if (input.type === "expr" && input.block?.opcode === "operator_multiply") {
+      const left = input.block.inputs?.NUM1;
+      const right = input.block.inputs?.NUM2;
+      const isTwo = (value) => value?.type === "value" && Number(value.value) === 2;
+      if (isTwo(right) && left) return left;
+      if (isTwo(left) && right) return right;
+    }
+    if (input.type !== "value") return input;
+    if (typeof input.value === "number") input.value /= 2;
+    return input;
+  };
 
   // Normalize Kitten actor references to Scratch touching-menu values
   if (type === "bump" || type === "bump_into") {
@@ -184,10 +345,88 @@ function applySpecial(type, irBlock, kittenBlock, context) {
     delete irBlock.fields.SPRITE2;
     delete irBlock.inputs.TOUCHINGOBJECTMENU;
     delete irBlock.inputs.SPRITE2;
+    delete irBlock.inputs.SPRITE1;
+    delete irBlock.fields.SPRITE1;
     irBlock.inputs.TOUCHINGOBJECTMENU = makeValue(normalize(sprite2), "string");
+    irBlock.__menuShadow = "TOUCHINGOBJECTMENU";
   }
 
   switch (type) {
+    case "broadcast_receive": {
+      const message = broadcastName(params.message ?? params.MESSAGE ?? params.msg ?? params.broadcast);
+      irBlock.fields.BROADCAST_OPTION = String(message ?? "");
+      delete irBlock.inputs.MESSAGE;
+      break;
+    }
+    case "broadcast_send": {
+      const original = params.message ?? params.MESSAGE ?? params.msg ?? params.broadcast;
+      const message = broadcastName(original);
+      irBlock.inputs.BROADCAST_INPUT = isBlockRef(message)
+        ? makeExpr(convertBlock(message, context))
+        : makeValue(String(message ?? ""), "string");
+      delete irBlock.inputs.MESSAGE;
+      break;
+    }
+    case "broadcast_input": {
+      const message = broadcastName(params.MESSAGE ?? params.message ?? params.msg ?? params.broadcast);
+      irBlock.fields.BROADCAST_OPTION = String(message ?? "");
+      delete irBlock.inputs.MESSAGE;
+      break;
+    }
+    case "costume_by_id": {
+      const id = params.sid || params.style_id || params.costume || params.style || "";
+      irBlock.fields.COSTUME = context.__styleNameById?.get(String(id)) || String(id);
+      break;
+    }
+    case "dialog_input": {
+      if (!irBlock.inputs.QUESTION && params.text !== undefined) {
+        irBlock.inputs.QUESTION = isBlockRef(params.text)
+          ? makeExpr(convertBlock(params.text, context))
+          : makeValue(String(params.text), "string");
+      }
+      break;
+    }
+    case "draggable": {
+      irBlock.fields.DRAG_MODE = String(params.draggable ?? params.mode ?? "1") === "1" ? "draggable" : "not draggable";
+      break;
+    }
+    case "pen_color": {
+      const color = params.color;
+      if (color !== undefined && !irBlock.inputs.COLOR) {
+        irBlock.inputs.COLOR = isBlockRef(color) ? makeExpr(convertBlock(color, context)) : makeValue(String(color), "string");
+      }
+      break;
+    }
+    case "pen_size": {
+      if (params.size !== undefined && !irBlock.inputs.SIZE) {
+        irBlock.inputs.SIZE = k3Scale(isBlockRef(params.size) ? makeExpr(convertBlock(params.size, context)) : makeValue(Number(params.size) || 1, "number"));
+      }
+      break;
+    }
+    case "self_move_to": {
+      if (irBlock.inputs.X) irBlock.inputs.X = k3Scale(irBlock.inputs.X);
+      if (irBlock.inputs.Y) irBlock.inputs.Y = k3Scale(irBlock.inputs.Y);
+      break;
+    }
+    case "move_specify": {
+      const target = params.target;
+      if (target !== undefined) irBlock.inputs.TO = isBlockRef(target) ? makeExpr(convertBlock(target, context)) : makeValue(String(target), "string");
+      break;
+    }
+    case "move_to": {
+      if (irBlock.inputs.X) irBlock.inputs.X = k3Scale(irBlock.inputs.X);
+      if (irBlock.inputs.Y) irBlock.inputs.Y = k3Scale(irBlock.inputs.Y);
+      break;
+    }
+    case "rotate":
+    case "self_rotate": {
+      const rawDegrees = irBlock.inputs.DEGREES || numericInput(params.degrees ?? 0, context);
+      // Kitten's positive rotation is opposite to Scratch's `turn right`
+      // convention. The official Scratch bridge serializes right turns as
+      // `0 - degrees`, so reverse the value on the way back.
+      irBlock.inputs.DEGREES = negate(rawDegrees);
+      break;
+    }
     case "break": {
       irBlock.fields.STOP_OPTION = ["this script"];
       delete irBlock.inputs.STOP_OPTION;
@@ -301,6 +540,58 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       }
       break;
     }
+    case "lists_get":
+    case "lists_append":
+    case "lists_delete":
+    case "lists_insert":
+    case "lists_replace":
+    case "lists_index_of":
+    case "lists_length":
+    case "lists_is_exist":
+    case "show_hide_list": {
+      const listName = params.VAR || params.list || params.LIST || "<unknown>";
+      if (type === "show_hide_list") {
+        irBlock.fields.LIST = listName;
+        irBlock.opcode = String(params.FUNC || params.func || "show").toLowerCase() === "hide"
+          ? "data_hidelist" : "data_showlist";
+        delete irBlock.inputs.FUNC;
+        delete irBlock.inputs.VAR;
+        break;
+      }
+      if (type === "lists_get" || type === "lists_length") irBlock.fields.LIST = listName;
+      if (type === "lists_index_of" || type === "lists_is_exist") irBlock.fields.LIST = listName;
+      if (type === "lists_append") {
+        irBlock.fields.LIST = listName;
+        const item = params.ITEM ?? params.item ?? params.VALUE ?? params.value;
+        if (item !== undefined) irBlock.inputs.ITEM = isBlockRef(item)
+          ? makeExpr(convertBlock(item, context)) : makeValue(String(item), "string");
+      } else if (type === "lists_delete" || type === "lists_get_value") {
+        const index = params.INDEX ?? params.index ?? params.N;
+        if (index !== undefined) irBlock.inputs.INDEX = isBlockRef(index)
+          ? makeExpr(convertBlock(index, context)) : makeValue(Number(index) || 1, "number");
+      } else if (type === "lists_insert") {
+        irBlock.fields.LIST = listName;
+        const item = params.ITEM ?? params.item ?? params.VALUE ?? params.value;
+        const index = params.INDEX ?? params.index ?? params.N;
+        if (item !== undefined) irBlock.inputs.ITEM = isBlockRef(item)
+          ? makeExpr(convertBlock(item, context)) : makeValue(String(item), "string");
+        if (index !== undefined) irBlock.inputs.INDEX = isBlockRef(index)
+          ? makeExpr(convertBlock(index, context)) : makeValue(Number(index) || 1, "number");
+      } else if (type === "lists_replace") {
+        irBlock.fields.LIST = listName;
+        const item = params.ITEM ?? params.item ?? params.VALUE ?? params.value;
+        const index = params.INDEX ?? params.index ?? params.N;
+        if (item !== undefined) irBlock.inputs.ITEM = isBlockRef(item)
+          ? makeExpr(convertBlock(item, context)) : makeValue(String(item), "string");
+        if (index !== undefined) irBlock.inputs.INDEX = isBlockRef(index)
+          ? makeExpr(convertBlock(index, context)) : makeValue(Number(index) || 1, "number");
+      } else if (type === "lists_index_of" || type === "lists_is_exist") {
+        const item = params.ITEM ?? params.item ?? params.VALUE ?? params.value;
+        if (item !== undefined) irBlock.inputs.ITEM = isBlockRef(item)
+          ? makeExpr(convertBlock(item, context)) : makeValue(String(item), "string");
+      }
+      break;
+    }
     case "procedures_2_defnoreturn": {
       irBlock.mutation = null;
       irBlock.__procName = kittenBlock.procedure_name || kittenBlock.params.procCode || "function";
@@ -342,8 +633,24 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       irBlock.fields.VARIABLE = params.VAR || "<unknown>";
       break;
     }
+    case "switch_to_screen":
     case "switch_screen": {
-      irBlock.fields.BROADCAST_OPTION = params.scene || params.screen || "";
+      const screen = params.scene || params.screen || params.message || "";
+      irBlock.opcode = "looks_switchbackdropto";
+      irBlock.inputs.BACKDROP = sceneBackdropInput(screen, context);
+      delete irBlock.fields.BROADCAST_OPTION;
+      delete irBlock.inputs.SCENE;
+      delete irBlock.inputs.SCREEN;
+      delete irBlock.inputs.MESSAGE;
+      break;
+    }
+    case "backdrop_on_change": {
+      const screen = params.scene || params.screen || params.backdrop || params.message || "";
+      const raw = String(screen);
+      irBlock.fields.BACKDROP = context.__sceneBackdropById?.get(raw) || context.__sceneBackdropByName?.get(raw) || raw;
+      delete irBlock.inputs.SCENE;
+      delete irBlock.inputs.SCREEN;
+      delete irBlock.inputs.MESSAGE;
       break;
     }
     case "broadcast_input": {
@@ -354,12 +661,13 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       delete irBlock.inputs.VALUE; delete irBlock.inputs.INCREASE; delete irBlock.inputs.COORDINARY;
       const coord = params.coordinary || params.coord || "y";
       const valueInput = isBlockRef(params.value) ? makeExpr(convertBlock(params.value, context)) : makeValue(Number(params.value) || 0, "number");
+      const scaledValueInput = k3Scale(valueInput);
       if (coord === "x") {
         irBlock.opcode = params.increase === "set" ? "motion_setx" : "motion_changexby";
-        irBlock.inputs.DX = valueInput;
+        irBlock.inputs.DX = scaledValueInput;
       } else {
         irBlock.opcode = params.increase === "set" ? "motion_sety" : "motion_changeyby";
-        irBlock.inputs.DY = valueInput;
+        irBlock.inputs.DY = scaledValueInput;
       }
       break;
     }
@@ -379,9 +687,10 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       }
       break;
     }
-    case "move_forward": {
+    case "move_forward":
+    case "self_go_forward": {
       if (params.steps !== undefined && !irBlock.inputs.STEPS) {
-        irBlock.inputs.STEPS = isBlockRef(params.steps) ? makeExpr(convertBlock(params.steps, context)) : makeValue(Number(params.steps) || 0, "number");
+        irBlock.inputs.STEPS = k3Scale(isBlockRef(params.steps) ? makeExpr(convertBlock(params.steps, context)) : makeValue(Number(params.steps) || 0, "number"));
       }
       break;
     }
@@ -411,22 +720,45 @@ function applySpecial(type, irBlock, kittenBlock, context) {
       break;
     }
     case "self_rotate_around": {
-      // Kitten rotates around a point; Scratch turns the sprite itself.
-      irBlock.opcode = "motion_turnright";
+      const rawDegrees = irBlock.inputs.DEGREES || numericInput(params.degrees ?? 0, context);
+      const angle = negate(rawDegrees);
+      const replacement = buildOrbitChain(kittenBlock, context, angle);
+      if (replacement) irBlock.__replacementChain = replacement;
       break;
     }
-    case "controls_if": {
+    case "controls_if":
+    case "controls_if_no_else":
+    case "control_if_else": {
+      const condition = params.condition ?? params.CONDITION ?? params.IF0;
+      if (condition !== undefined) {
+        irBlock.inputs.CONDITION = isBlockRef(condition)
+          ? makeExpr(convertBlock(condition, context))
+          : makeValue(Boolean(condition), "bool");
+      }
+      delete irBlock.inputs.IF0;
+      const hasElse = Boolean(
+        kittenBlock.__extraStatements?.some(statement => statement.name === "ELSE") ||
+        /else\s*=\s*["']?1/.test(String(kittenBlock.mutation || "")),
+      );
+      if (hasElse) irBlock.opcode = "control_if_else";
       // block_data_json gives us DO0/ELSE statement chains via __extraStatements
       if (kittenBlock.__extraStatements) {
         const elseStmt = kittenBlock.__extraStatements.find(s => s.name === "ELSE");
         if (elseStmt && elseStmt.chain && elseStmt.chain.length > 0) {
-          irBlock.branches[1] = elseStmt.chain;
+          irBlock.branches[1] = convertChain(elseStmt.chain[0], context);
         }
         const doStmt = kittenBlock.__extraStatements.find(s => s.name === "DO0");
         if (doStmt && doStmt.chain && doStmt.chain.length > 0) {
-          irBlock.branches[0] = doStmt.chain;
+          irBlock.branches[0] = convertChain(doStmt.chain[0], context);
         }
       }
+      break;
+    }
+    case "mouse_down": {
+      // Scratch only has the `mouse down?` reporter; K4 stores the fixed
+      // `down` selector as a Blockly field, which is not a Scratch input.
+      delete irBlock.inputs.MOUSE_EVENT_TYPE;
+      delete irBlock.fields.MOUSE_EVENT_TYPE;
       break;
     }
     case "arithmetic":
@@ -459,26 +791,49 @@ function costumeFromStyle(styleInfo, defaultName) {
       inlineData = Buffer.from(m[2], "base64");
     }
   } else if (url) {
-    sourceFile = url.split("/").pop();
+    // Keep absolute CDN URLs intact. The CLI hydrates them before the SB3
+    // emitter resolves local asset paths; reducing this to the basename loses
+    // the information needed for that download step.
+    sourceFile = url;
     const ext = (sourceFile.split(".").pop() || "").toLowerCase();
     dataFormat = ext === "svg" ? "svg" : ext === "png" ? "png" : (ext === "jpg" || ext === "jpeg") ? "jpg" : ext === "mp3" ? "mp3" : ext === "wav" ? "wav" : "svg";
   }
   const center = styleInfo.rotate_center || styleInfo.pivot || { x: 0, y: 0 };
+  // Kitten rotate_center is relative to the image center (y up),
+  // Scratch rotationCenter is relative to the top-left corner (y down).
+  let dims = { width: 0, height: 0 };
+  if (inlineData && dataFormat === "png") {
+    // PNG IHDR: width/height at bytes 16..23
+    if (inlineData.length >= 24) {
+      dims.width = inlineData.readUInt32BE(16);
+      dims.height = inlineData.readUInt32BE(20);
+    }
+  } else if (inlineData && dataFormat === "svg") {
+    const text = inlineData.toString("utf8", 0, 4096);
+    const wm = text.match(/width="([\d.]+)/);
+    const hm = text.match(/height="([\d.]+)/);
+    if (wm) dims.width = parseFloat(wm[1]);
+    if (hm) dims.height = parseFloat(hm[1]);
+  }
+  const rcx = center.x !== undefined ? dims.width / 2 + center.x : dims.width / 2;
+  const rcy = center.y !== undefined ? dims.height / 2 - center.y : dims.height / 2;
   return {
     name: styleInfo.name || "costume",
     sourceFile,
     dataFormat,
-    rotationCenterX: center.x || 0,
-    rotationCenterY: center.y || 0,
+    rotationCenterX: rcx,
+    rotationCenterY: rcy,
     bitmapResolution: 1,
     __data: inlineData,
   };
 }
 
 function parseKitten4(projectJson) {
+  const source = projectJson.__sourceFormat || "kitten4";
   const project = makeProject(projectJson.project_name || "Kitten Project", {
-    sourceFormat: "kitten4",
+    sourceFormat: source,
     sourceFile: projectJson.__sourceFile || null,
+    framerate: Number(projectJson.framerate || projectJson.fps) || 60,
   });
 
   // Variables
@@ -518,44 +873,75 @@ function parseKitten4(projectJson) {
   const scenes = theatre.scenes || {};
   const actors = theatre.actors || {};
 
-  // Stage (first scene as stage, subsequent scenes become sprites with special naming)
-  const sceneIds = Object.keys(scenes);
+  // Every Kitten scene becomes a Scratch/TurboWarp backdrop on one stage.
+  const sceneIds = theatre.scenes_order || Object.keys(scenes);
   const stageSceneId = theatre.current_scene || sceneIds[0];
   const stageScene = scenes[stageSceneId];
 
+  // TurboWarp supports custom stage dimensions. Preserve Kitten's canvas
+  // rather than fitting a portrait project into Scratch's 480x360 viewport.
+  const kittenW = (projectJson.size && projectJson.size.width) || 480;
+  const kittenH = (projectJson.size && projectJson.size.height) || 360;
+  const sx = 1;
+  const sy = 1;
+  const s = 1;
+  project.meta.stageWidth = kittenW;
+  project.meta.stageHeight = kittenH;
+  project.meta.scaleX = sx;
+  project.meta.scaleY = sy;
+  project.meta.uniformScale = s;
+
   const stage = makeTarget("Stage", true);
-  if (stageScene) {
-    stage.name = stageScene.name || "Stage";
-    const theatreStyles = theatre.styles || {};
-    const styleInfo = theatreStyles[stageScene.current_style_id || (stageScene.styles || [])[0]];
-    const stageCostume = costumeFromStyle(styleInfo, "backdrop1");
-    if (stageCostume) {
-      stage.costumes.push(stageCostume);
-    }
-    project.stage = stage;
-  }
+  stage.name = stageScene?.name || "Stage";
+  const sceneBackdrops = addSceneBackdrops(stage, {
+    scenes,
+    sceneIds,
+    currentSceneId: stageSceneId,
+    styles: theatre.styles || {},
+    makeCostume: costumeFromStyle,
+  });
+  project.stage = stage;
 
   // Actors -> Sprites
   let layerOrder = 1;
+  const usedSpriteNames = new Set();
+  const actorNameById = new Map();
   for (const [actorId, actor] of Object.entries(actors)) {
-    const sprite = makeTarget(actor.name || actorId, false);
+    const sprite = makeTarget(uniqueSceneSpriteName(actor.name || actorId, usedSpriteNames), false);
     sprite.__actorId = actorId;
-    sprite.x = actor.x || 0;
-    sprite.y = actor.y || 0;
-    sprite.size = actor.scale || 100;
-    sprite.visible = actor.visible !== false;
+    sprite.__sceneId = actor.scene || null;
+    sprite.__sceneVisible = actor.visible !== false;
+    sprite.x = (actor.x || 0) * sx;
+    // K4 serializes actor positions in the same Y-up coordinate system as
+    // Scratch/TurboWarp. Flipping this puts the top and bottom actors in the
+    // opposite places on a portrait stage.
+    sprite.y = (actor.y || 0) * sy;
+    sprite.size = source === "kitten3" ? (actor.scale || 100) : (actor.scale || 100) * s;
+    if (Number.isFinite(Number(actor.rotation))) {
+      sprite.direction = 90 - Number(actor.rotation) * 180 / Math.PI;
+    }
+    sprite.visible = sprite.__sceneVisible && (!sprite.__sceneId || sprite.__sceneId === stageSceneId);
+    sprite.draggable = actor.draggable === true;
+    sprite.rotationStyle = scratchRotationStyle(actor.rotation_type);
     sprite.layerOrder = layerOrder++;
 
     // Styles -> costumes (use real asset data from theatre.styles)
     const theatreStyles = theatre.styles || {};
     const styleIds = actor.styles || [];
+    const costumeStyleIds = [];
     for (const styleId of styleIds) {
       const styleInfo = theatreStyles[styleId];
       if (!styleInfo) continue;
       const costume = costumeFromStyle(styleInfo, styleId);
-      if (costume) sprite.costumes.push(costume);
+      if (costume) {
+        sprite.costumes.push(costume);
+        costumeStyleIds.push(styleId);
+      }
     }
+    const currentCostume = costumeStyleIds.indexOf(actor.current_style_id);
+    sprite.currentCostume = currentCostume >= 0 ? currentCostume : 0;
 
+    actorNameById.set(actorId, sprite.name);
     project.sprites.push(sprite);
   }
 
@@ -567,14 +953,17 @@ function parseKitten4(projectJson) {
   }
   const blockDataGraph = require("./block_data_graph");
   const actorBlockData = {};
-  const actorNameById = new Map();
-  for (const [actorId, actor] of Object.entries(actors)) {
-    actorNameById.set(actorId, actor.name || actorId);
-  }
   for (const [actorId, actor] of Object.entries(actors)) {
     if (actor.block_data_json && actor.block_data_json.blocks) {
       const chains = blockDataGraph.blockDataJsonToChains(actor.block_data_json);
       actorBlockData[actorId] = chains.map(chain => ({ compiled_block_map: { root: chain } }));
+    }
+  }
+  const sceneBlockData = {};
+  for (const [sceneId, scene] of Object.entries(scenes)) {
+    if (scene.block_data_json?.blocks) {
+      const chains = blockDataGraph.blockDataJsonToChains(scene.block_data_json);
+      sceneBlockData[sceneId] = chains.map(chain => ({ compiled_block_map: { root: chain } }));
     }
   }
 
@@ -636,12 +1025,23 @@ function parseKitten4(projectJson) {
     }
   }
 
-  // Attach scene scripts to stage
-  const stageEntity = entityMap.get(stageSceneId);
-  if (stageEntity) {
-    for (const [rootId, rootBlock] of Object.entries(stageEntity.compiled_block_map || {})) {
-      const chain = convertChain(rootBlock, { project, target: stage });
+  // Initial scene scripts run normally. Inactive scenes contribute only their
+  // backdrop-change hats, which are activated after a screen switch.
+  for (const sceneId of sceneIds) {
+    const entities = [];
+    if (entityMap.get(sceneId)) entities.push(entityMap.get(sceneId));
+    if (sceneBlockData[sceneId]) entities.push(...sceneBlockData[sceneId]);
+    for (const stageEntity of entities) {
+      for (const [rootId, rootBlock] of Object.entries(stageEntity.compiled_block_map || {})) {
+      const activatedRoot = sceneActivationRoot(rootBlock, sceneId, sceneId === stageSceneId);
+      if (sceneId !== stageSceneId && activatedRoot.type !== "backdrop_on_change") continue;
+      const chain = convertChain(activatedRoot, {
+        project, target: stage, source,
+        __sceneBackdropById: sceneBackdrops.sceneBackdropById,
+        __sceneBackdropByName: sceneBackdrops.sceneBackdropByName,
+      });
       if (chain.length > 0) stage.blocks.push(chain);
+      }
     }
   }
 
@@ -656,11 +1056,29 @@ function parseKitten4(projectJson) {
     if (entities) {
       for (const entity of entities) {
         for (const [rootId, rootBlock] of Object.entries(entity.compiled_block_map || {})) {
-        const chain = convertChain(rootBlock, { project, target: sprite, procedures: sprite.__procedures, __actorNameById: actorNameById });
+        const chain = convertChain(sceneActivationRoot(
+          rootBlock,
+          sprite.__sceneId,
+          !sprite.__sceneId || sprite.__sceneId === stageSceneId,
+        ), {
+          project, target: sprite, procedures: sprite.__procedures, __actorNameById: actorNameById, source,
+          __sceneBackdropById: sceneBackdrops.sceneBackdropById,
+          __sceneBackdropByName: sceneBackdrops.sceneBackdropByName,
+        });
         if (chain.length > 0) sprite.blocks.push(chain);
         }
       }
     }
+  }
+
+  for (const sprite of project.sprites) {
+    addSpriteInitialization(sprite);
+    addSceneVisibilityHandlers(
+      sprite,
+      sceneBackdrops.sceneBackdropById.get(String(sprite.__sceneId)),
+      sceneBackdrops.sceneBackdropNames,
+      sprite.__sceneVisible,
+    );
   }
 
   project.__assetFiles = global.__k2s_assetFiles || null;

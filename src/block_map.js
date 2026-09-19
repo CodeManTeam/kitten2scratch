@@ -87,15 +87,23 @@ const BLOCK_MAP = {
   start_on_click: { opcode: "event_whenflagclicked", map: {} },
   on_keydown: { opcode: "event_whenkeypressed", map: { KEY_OPTION: F("key"), KEY_MODE: F("type") } },
   sprite_on_tap: { opcode: "event_whenthisspriteclicked", map: {}, hat: true, dropParams: ["actor", "type"] },
-  broadcast_input: { opcode: "event_whenbroadcastreceived", map: { BROADCAST_OPTION: F("message") } },
+  self_on_tap: { opcode: "event_whenthisspriteclicked", map: {}, hat: true },
+  // In K3 this is a message selector value nested inside self_listen/self_broadcast,
+  // not an independent Scratch event hat.
+  broadcast_input: { opcode: "event_whenbroadcastreceived", map: {}, special: "broadcast_input" },
+  self_listen: { opcode: "event_whenbroadcastreceived", map: {}, special: "broadcast_receive", hat: true },
+  self_broadcast: { opcode: "event_broadcast", map: {}, special: "broadcast_send" },
+  self_broadcast_and_wait: { opcode: "event_broadcastandwait", map: {}, special: "broadcast_send" },
   on_running_group_activated: { opcode: "event_whenflagclicked", map: {} },
-  backdrop_on_change: { opcode: "event_whenbroadcastreceived", map: { BROADCAST_OPTION: null } },
+  backdrop_on_change: { opcode: "event_whenbackdropswitchesto", map: {}, special: "backdrop_on_change", hat: true },
   when: { opcode: "event_whenbroadcastreceived", map: { CONDITION: E("condition") } },
 
   // ===== Control =====
   repeat_forever: { opcode: "control_forever", map: {}, branch: "child_block" },
   repeat_n_times: { opcode: "control_repeat", map: { TIMES: N("times") }, branch: "child_block" },
-  controls_if: { opcode: "control_if", map: { CONDITION: E("condition") }, branch: "child_block" },
+  controls_if: { opcode: "control_if", map: { CONDITION: E("condition") }, branch: "child_block", special: "controls_if" },
+  controls_if_no_else: { opcode: "control_if", map: { CONDITION: E("condition") }, branch: "child_block", special: "controls_if" },
+  control_if_else: { opcode: "control_if", map: { CONDITION: E("condition") }, branch: "child_block", special: "controls_if" },
   wait: { opcode: "control_wait", map: { DURATION: N("time") } },
   wait_until: { opcode: "control_wait_until", map: { CONDITION: E("condition") } },
   repeat_forever_until: { opcode: "control_repeat_until", map: { CONDITION: E("condition") }, branch: "child_block" },
@@ -104,12 +112,14 @@ const BLOCK_MAP = {
 
   // ===== Motion =====
   self_go_forward: { opcode: "motion_movesteps", special: "move_forward" },
-  self_move_to: { opcode: "motion_gotoxy", map: { X: N("x"), Y: N("y") } },
+  self_rotate: { opcode: "motion_turnright", special: "rotate" },
+  self_move_to: { opcode: "motion_gotoxy", map: { X: N("x"), Y: N("y") }, special: "move_to" },
   self_glide_to: { opcode: "motion_glidesecstoxy", special: "glide" },
   self_change_coordinate: { opcode: "motion_changeyby", special: "change_coord" },
   self_change_x: { opcode: "motion_changexby", map: { DX: N("x") } },
   mirror: { opcode: "motion_turnright", special: "mirror" },
   self_point_towards: { opcode: "motion_pointindirection", map: { DIRECTION: N("degrees") } },
+  self_move_specify: { opcode: "motion_goto", map: {}, special: "move_specify" },
 
   // ===== Looks =====
   self_prev_next_style: { opcode: "looks_nextcostume", map: {}, special: "costume" },
@@ -119,6 +129,11 @@ const BLOCK_MAP = {
   self_change_scale_2: { opcode: "looks_setsizeto", map: { SIZE: E("scale") } },
   self_text_effect_text: { opcode: "looks_say", map: { MESSAGE: E("text") } },
   self_text_effect_color: { opcode: "looks_seteffectto", map: { EFFECT: "color", VALUE: E("color") } },
+  self_next_style: { opcode: "looks_nextcostume", map: {} },
+  set_costume_by_id: { opcode: "looks_switchcostumeto", map: {}, special: "costume_by_id" },
+  set_costume: { opcode: "looks_switchcostumeto", map: {}, special: "costume_by_id" },
+  self_change_scale: { opcode: "looks_changesizeby", map: { CHANGE: E("scale") } },
+  self_clear_effects: { opcode: "looks_cleargraphiceffects", map: {} },
   set_theatre_layer: { opcode: "looks_gotofrontback", special: "layer" },
   set_scale: { opcode: "looks_setsizeto", map: { SIZE: E("scale") } },
 
@@ -135,13 +150,16 @@ const BLOCK_MAP = {
   clear_drawing: { opcode: "pen_clear", map: {} },
   set_layer_with_pen: { opcode: "pen_setPenColorToColor", map: { COLOR: E("color") } },
   stamp: { opcode: "pen_stamp", map: {} },
+  image_stamp: { opcode: "pen_stamp", map: {} },
+  self_set_pen_color: { opcode: "pen_setPenColorToColor", map: { COLOR: E("color") }, special: "pen_color" },
+  self_set_pen_size: { opcode: "pen_setPenSizeTo", map: { SIZE: E("size") }, special: "pen_size" },
 
   // ===== Sensing =====
-  mouse_down: { opcode: "sensing_mousedown", map: { MOUSE_EVENT_TYPE: F("mouse_event_type") } },
+  mouse_down: { opcode: "sensing_mousedown", map: { MOUSE_EVENT_TYPE: F("mouse_event_type") }, special: "mouse_down" },
   mouse_click: { opcode: "sensing_mousedown", map: { MOUSE_EVENT_TYPE: F("mouse_event_type") } },
   check_key: { opcode: "sensing_keypressed", map: { KEY_OPTION: E("key") } },
-  bump: { opcode: "sensing_touchingobject", map: { TOUCHINGOBJECTMENU: F("sprite1"), SPRITE2: F("sprite2") }, special: "bump" },
-  bump_into: { opcode: "sensing_touchingobject", map: { TOUCHINGOBJECTMENU: F("sprite1"), SPRITE2: F("sprite2") }, special: "bump" },
+  bump: { opcode: "sensing_touchingobject", map: {}, special: "bump" },
+  bump_into: { opcode: "sensing_touchingobject", map: {}, special: "bump" },
   bump_into_color: { opcode: "sensing_touchingcolor", map: { COLOR: E("color") } },
   get_answer: { opcode: "sensing_answer", map: {} },
   get_choice_or_index: { opcode: "sensing_answer", map: {} },
@@ -154,6 +172,9 @@ const BLOCK_MAP = {
   distance_to: { opcode: "sensing_distanceto", map: { DISTANCETOMENU: F("sprite2") } },
   coordinate_of_sprite: { opcode: "sensing_of", special: "attribute_of" },
   get_mouse_info: { opcode: "sensing_mousex", special: "mouse_info" },
+  self_ask: { opcode: "sensing_askandwait", map: {}, special: "dialog_input" },
+  get_timer: { opcode: "sensing_timer", map: {} },
+  reset_timer: { opcode: "sensing_resettimer", map: {} },
   out_of_boundary: { opcode: "sensing_touchingobject", special: "out_of_boundary" },
 
   // ===== Math / Logic / Text =====
@@ -215,7 +236,7 @@ const BLOCK_MAP = {
   get_clone_index_property: { opcode: "sensing_of", special: "clone_prop" },
 
   // ===== Stage / Screen =====
-  switch_to_screen: { opcode: "event_broadcast", special: "switch_screen" },
+  switch_to_screen: { opcode: "looks_switchbackdropto", special: "switch_to_screen" },
   create_stage_dialog: { opcode: "looks_say", map: { MESSAGE: E("message") }, special: "stage_dialog" },
   get_3: { opcode: "sensing_of", special: "get_3" },
 
@@ -223,6 +244,16 @@ const BLOCK_MAP = {
   change_variables: { opcode: "data_changevariableby", special: "variable_change" },
   script_variables_value: { opcode: "data_variable", special: "script_variable_get" },
   script_variables_param: { opcode: "argument_reporter_string_number", special: "procedure_param" },
+  lists_get: { opcode: "data_listcontents", map: {}, special: "list_contents" },
+  lists_append: { opcode: "data_addtolist", map: {}, special: "list_append" },
+  lists_delete: { opcode: "data_deleteoflist", map: {}, special: "list_delete" },
+  lists_insert: { opcode: "data_insertatlist", map: {}, special: "list_insert" },
+  lists_replace: { opcode: "data_replaceitemoflist", map: {}, special: "list_replace" },
+  lists_get_value: { opcode: "data_itemoflist", map: {}, special: "list_get" },
+  lists_index_of: { opcode: "data_itemnumoflist", map: {}, special: "list_index" },
+  lists_length: { opcode: "data_lengthoflist", map: {}, special: "list_length" },
+  lists_is_exist: { opcode: "data_listcontainsitem", map: {}, special: "list_contains" },
+  show_hide_list: { opcode: "data_showlist", map: {}, special: "show_list" },
 };
 
 module.exports = {

@@ -9,17 +9,45 @@
 const fs = require("fs");
 const path = require("path");
 const { parseKitten4 } = require("./src/parse_kitten4");
+const { parseKitten3 } = require("./src/parse_kitten3");
 const { parseKittenN } = require("./src/parse_kittenn");
 const { emitProject, packageSb3 } = require("./src/emit_sb3");
+
+async function hydrateRemoteAssets(project) {
+  const targets = [project.stage, ...(project.sprites || [])].filter(Boolean);
+  const seen = new Map();
+  for (const target of targets) {
+    for (const asset of [...(target.costumes || []), ...(target.sounds || [])]) {
+      const url = asset.sourceFile;
+      if (!/^https?:\/\//i.test(String(url || "")) || asset.__data) continue;
+      if (!seen.has(url)) {
+        try {
+          const response = await fetch(url, { signal: AbortSignal.timeout(20000) });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          seen.set(url, Buffer.from(await response.arrayBuffer()));
+        } catch (error) {
+          console.warn(`Warning: cannot download asset ${url}: ${error.message}`);
+          seen.set(url, null);
+        }
+      }
+      const data = seen.get(url);
+      if (data) {
+        asset.__data = data;
+        asset.sourceFile = null;
+      }
+    }
+  }
+}
 
 function detectFormat(filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === ".bcmkn") return "kittenn";
-  if (ext === ".bcm4" || ext === ".bcm") return "kitten4";
   if (typeof content === "string") {
     try { content = JSON.parse(content); } catch { return null; }
   }
   if (!content || typeof content !== "object") return null;
+  if (content.theatre && /^3\./.test(String(content.application_version || ""))) return "kitten3";
+  if (ext === ".bcm4" || ext === ".bcm") return "kitten4";
   if (content.compile_result && content.theatre) return "kitten4";
   if (content.scenes && content.actors && content.projectName !== undefined) return "kittenn";
   return null;
@@ -51,19 +79,23 @@ async function main() {
 
   const format = detectFormat(inputPath, parsed);
   if (!format) {
-    console.error("Cannot detect project format (not Kitten4/KittenN JSON)");
+    console.error("Cannot detect project format (not Kitten3/Kitten4/KittenN JSON)");
     process.exit(1);
   }
   console.log(`Detected format: ${format}`);
 
   let project;
-  if (format === "kitten4") {
+  if (format === "kitten4" || format === "kitten3") {
     parsed.__sourceFile = inputPath;
-    project = parseKitten4(parsed);
+    project = format === "kitten3" ? parseKitten3(parsed) : parseKitten4(parsed);
     project.meta.projectDir = require("path").dirname(inputPath);
   } else {
     project = parseKittenN(parsed);
   }
+
+  // K3 stores CDN URLs in theatre.styles/audio. Package them into SB3 so the
+  // result remains self-contained instead of relying on the CDN at runtime.
+  await hydrateRemoteAssets(project);
 
   const sb3Project = emitProject(project);
 

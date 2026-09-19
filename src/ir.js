@@ -89,8 +89,42 @@ function makeTarget(name, isStage = false) {
     visible: true,
     draggable: false,
     rotationStyle: "all around",
+    currentCostume: 0,
     layerOrder: 0,
   };
+}
+
+function addSpriteInitialization(target) {
+  if (!target || target.isStage) return;
+  const number = (value, fallback = 0) => {
+    const parsed = Number(value);
+    return makeValue(Number.isFinite(parsed) ? parsed : fallback, "number");
+  };
+  const costume = target.costumes[target.currentCostume] || target.costumes[0];
+  const chain = [
+    makeBlock("event_whenflagclicked"),
+    makeBlock("motion_gotoxy", { inputs: { X: number(target.x), Y: number(target.y) } }),
+    makeBlock("motion_setrotationstyle", { fields: { STYLE: target.rotationStyle || "all around" } }),
+    makeBlock("motion_pointindirection", { inputs: { DIRECTION: number(target.direction, 90) } }),
+    makeBlock("looks_setsizeto", { inputs: { SIZE: number(target.size, 100) } }),
+  ];
+  if (costume) {
+    chain.push(makeBlock("looks_switchcostumeto", {
+      inputs: { COSTUME: makeValue(costume.name, "string") },
+    }));
+  }
+  chain.push(makeBlock(target.visible === false ? "looks_hide" : "looks_show"));
+  target.blocks.unshift(chain);
+}
+
+function addSceneVisibilityHandlers(target, ownBackdrop, allBackdrops, visible) {
+  if (!ownBackdrop) return;
+  for (const backdrop of allBackdrops) {
+    target.blocks.push([
+      makeBlock("event_whenbackdropswitchesto", { fields: { BACKDROP: backdrop } }),
+      makeBlock(backdrop === ownBackdrop && visible ? "looks_show" : "looks_hide"),
+    ]);
+  }
 }
 
 function makeVariable(id, name, value, isCloud = false, isList = false, isGlobal = true) {
@@ -143,6 +177,8 @@ module.exports = {
   makeValue,
   makeProject,
   makeTarget,
+  addSpriteInitialization,
+  addSceneVisibilityHandlers,
   makeVariable,
   makeBroadcast,
   makeCostume,
